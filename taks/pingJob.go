@@ -178,6 +178,24 @@ func (j *Job) run() {
 
 			writeApi.Flush()
 
+			dbServers, err := database.MongoClient.
+				Database("minetracker").
+				Collection("servers").
+				Find(context.Background(), bson.M{})
+
+			if err != nil {
+				util.Logger.Error().Err(err).Msg("Failed to fetch servers for returning all servers")
+				return
+			}
+
+			var allServers []data.Server
+			if err := dbServers.All(context.Background(), &allServers); err != nil {
+				util.Logger.Error().Err(err).Msg("Failed to decode servers for returning all servers")
+				return
+			}
+
+			results = allServers
+
 			websocket.GlobalHub.Broadcast(
 				map[string]interface{}{
 					"type":    "servers_update",
