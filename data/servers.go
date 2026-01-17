@@ -12,6 +12,7 @@ type PingableServer struct {
 }
 
 type Server struct {
+	Name        string `json:"name"`
 	IP          string `json:"ip"`
 	Icon        string `json:"icon,omitempty"`
 	Type        string `json:"type"`
@@ -22,6 +23,7 @@ type Server struct {
 
 type ExtendedServer struct {
 	PingableServer
+	Name    string `json:"name"`
 	Icon    string `json:"icon,omitempty"`
 	Online  bool   `json:"online"`
 	Current int    `json:"current_players"`

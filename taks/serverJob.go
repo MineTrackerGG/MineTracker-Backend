@@ -117,6 +117,7 @@ func (j *Job) run() {
 
 				if err != nil {
 					existingServer = data.Server{
+						Name:        server.Name,
 						IP:          server.IP,
 						Type:        server.Type,
 						Online:      true,
@@ -156,6 +157,7 @@ func (j *Job) run() {
 				tags := map[string]string{
 					"ip":   server.IP,
 					"type": server.Type,
+					"name": server.Name,
 				}
 
 				fields := map[string]interface{}{
