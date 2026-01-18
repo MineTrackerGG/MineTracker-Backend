@@ -8,7 +8,6 @@ import (
 	"MineTracker/util"
 	"MineTracker/websocket"
 	"context"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -85,18 +84,13 @@ func main() {
 		routes.RegisterGetDatedDataRoute(r)
 		routes.RegisterGetBulkDatedDataRoute(r)
 
-		util.Logger.Info().Msg("Started Gin HTTP server on :" + os.Getenv("HTTP_PORT"))
+		r.GET("/ws", func(c *gin.Context) {
+			websocket.HandleWebSocket(c.Writer, c.Request)
+		})
+
+		util.Logger.Info().Msg("Started HTTP and WebSocket server on :" + os.Getenv("HTTP_PORT"))
 		if err := r.Run(":" + os.Getenv("HTTP_PORT")); err != nil {
-			util.Logger.Fatal().Err(err).Msg("Gin server crashed")
-		}
-	}()
-
-	go func() {
-		http.HandleFunc("/ws", websocket.HandleWebSocket)
-
-		util.Logger.Info().Msg("Started WebSocket server on :8001")
-		if err := http.ListenAndServe(":8001", nil); err != nil {
-			util.Logger.Fatal().Err(err).Msg("WebSocket server crashed")
+			util.Logger.Fatal().Err(err).Msg("Server crashed")
 		}
 	}()
 
