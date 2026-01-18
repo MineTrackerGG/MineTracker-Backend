@@ -1,12 +1,24 @@
-FROM golang:1.25.6
+FROM golang:1.25.6-alpine AS builder
 
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# pre-copy/cache go.mod for pre-downloading dependencies and only redownloading them in subsequent builds if they change
+RUN apk add --no-cache git ca-certificates
+
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -v -o /usr/local/bin/app MineTracker
 
-CMD ["/usr/local/bin/app"]
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -o app MineTracker
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+COPY --from=builder /app/app .
+
+CMD ["./app"]
