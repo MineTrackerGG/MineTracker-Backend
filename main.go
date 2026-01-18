@@ -3,6 +3,7 @@ package main
 import (
 	"MineTracker/data"
 	"MineTracker/database"
+	"MineTracker/routes"
 	task "MineTracker/taks"
 	"MineTracker/util"
 	"MineTracker/websocket"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
@@ -25,6 +28,8 @@ func main() {
 		util.Logger.Fatal().Err(err).Msg("Failed to connect to MongoDB")
 		panic(err)
 	}
+
+	ctx, serverJobCancel := context.WithCancel(context.Background())
 
 	database.MongoClient = mongo
 
@@ -41,21 +46,58 @@ func main() {
 
 	Servers, err := data.LoadServers("servers.json")
 
+	data.Servers = Servers
+
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to load servers.json")
 	}
 
+	pingJob := task.NewServerJob(1*time.Second, Servers)
+
+	go pingJob.StartServerJob(ctx)
+
+	err = data.InitCache()
+	if err != nil {
+		util.Logger.Fatal().Err(err).Msg("Failed to initialize server cache")
+		return
+	}
+
 	util.Logger.Info().Msg("Loaded " + strconv.Itoa(int(rune(len(Servers)))) + " servers from servers.json")
 
-	ctx, serverJobCancel := context.WithCancel(context.Background())
+	go func() {
+		if os.Getenv("DEPLOYMENT_MODE") == "production" || os.Getenv("DEPLOYMENT_MODE") == "release" {
+			gin.SetMode(gin.ReleaseMode)
+		} else {
+			gin.SetMode(gin.DebugMode)
+		}
 
-	serverJob := task.NewServerJob(time.Second*1, Servers)
-	go serverJob.Start(ctx)
+		r := gin.Default()
 
-	http.HandleFunc("/ws", websocket.HandleWebSocket)
+		r.Use(cors.New(cors.Config{
+			AllowOrigins:     []string{os.Getenv("FRONTEND_URL")},
+			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: true,
+			MaxAge:           12 * time.Hour,
+		}))
 
-	util.Logger.Info().Msg("Started MineTracker WebSocket server on :8080")
-	util.Logger.Fatal().Err(http.ListenAndServe(":8080", nil))
+		routes.RegisterGetDatedDataRoute(r)
+
+		util.Logger.Info().Msg("Started Gin HTTP server on :" + os.Getenv("HTTP_PORT"))
+		if err := r.Run(":" + os.Getenv("HTTP_PORT")); err != nil {
+			util.Logger.Fatal().Err(err).Msg("Gin server crashed")
+		}
+	}()
+
+	go func() {
+		http.HandleFunc("/ws", websocket.HandleWebSocket)
+
+		util.Logger.Info().Msg("Started WebSocket server on :8001")
+		if err := http.ListenAndServe(":8001", nil); err != nil {
+			util.Logger.Fatal().Err(err).Msg("WebSocket server crashed")
+		}
+	}()
 
 	// Wait for termination signal to gracefully shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

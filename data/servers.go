@@ -1,7 +1,10 @@
 package data
 
 import (
+	"MineTracker/database"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -23,7 +26,6 @@ type Server struct {
 
 type ExtendedServer struct {
 	PingableServer
-	Name    string `json:"name"`
 	Icon    string `json:"icon,omitempty"`
 	Online  bool   `json:"online"`
 	Current int    `json:"current_players"`
@@ -31,6 +33,15 @@ type ExtendedServer struct {
 	Mean    int    `json:"mean_players"`
 	Lowest  int    `json:"lowest_players"`
 }
+
+type ServerDataPoint struct {
+	Timestamp   int64  `json:"timestamp"`
+	PlayerCount int    `json:"player_count"`
+	Ip          string `json:"ip"`
+	Name        string `json:"name"`
+}
+
+var Servers []PingableServer
 
 func LoadServers(path string) ([]PingableServer, error) {
 	data, err := os.ReadFile(path)
@@ -44,4 +55,53 @@ func LoadServers(path string) ([]PingableServer, error) {
 	}
 
 	return servers, nil
+}
+
+func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, error) {
+	queryApi := database.InfluxClient.QueryAPI(os.Getenv("INFLUXDB_ORG"))
+
+	query, _, step, err := BuildInfluxQueryFromParams(QueryParams{
+		Start:         duration,
+		ServerFilter:  ip,
+		MaxDataPoints: 500,
+		MinDataPoints: 10,
+		UseAdaptive:   true,
+	})
+
+	if err != nil {
+		return nil, "0m", fmt.Errorf("failed to build query: %w", err)
+	}
+
+	result, err := queryApi.Query(context.Background(), query)
+	if err != nil {
+		return nil, "0m", fmt.Errorf("query execution failed: %w", err)
+	}
+
+	var dataPoints []ServerDataPoint
+
+	for result.Next() {
+		record := result.Record()
+		if record == nil {
+			continue
+		}
+
+		dataPoint := ServerDataPoint{
+			Timestamp:   record.Time().Unix(),
+			PlayerCount: int(record.Value().(float64)),
+			Ip:          record.ValueByKey("ip").(string),
+			Name:        record.ValueByKey("name").(string),
+		}
+
+		if ip == "" || dataPoint.Ip == ip {
+			dataPoints = append(dataPoints, dataPoint)
+		}
+	}
+
+	if result.Err() != nil {
+		return nil, "0m", fmt.Errorf("result error: %w", result.Err())
+	}
+
+	_ = result.Close()
+
+	return dataPoints, step, nil
 }
