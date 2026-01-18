@@ -10,14 +10,14 @@ COPY . .
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -o minetracker .
+    CGO_ENABLED=0 GOOS=linux go build -o MineTracker .
 
 FROM alpine:latest
 
 WORKDIR /app
 RUN apk --no-cache add ca-certificates
-COPY --from=builder /app/minetracker .
+COPY --from=builder /app/MineTracker .
 
 RUN mkdir -p /app/data
 
-CMD ["./minetracker"]
+CMD ["./MineTracker"]
