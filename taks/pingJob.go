@@ -8,6 +8,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
@@ -80,9 +81,13 @@ func (j *PingJob) run() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
+	var wg sync.WaitGroup
+
 	// Start workers
 	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			writeApi := database.InfluxClient.WriteAPI(database.GetInfluxOrg(), database.GetInfluxBucket())
 			defer writeApi.Flush()
 
@@ -182,6 +187,7 @@ func (j *PingJob) run() {
 		}()
 	}
 
+	// Feed jobs
 	go func() {
 		for _, server := range j.servers {
 			jobs <- server
@@ -189,8 +195,9 @@ func (j *PingJob) run() {
 		close(jobs)
 	}()
 
+	// Close results when all workers are done
 	go func() {
-		time.Sleep(time.Second * 30)
+		wg.Wait()
 		close(results)
 	}()
 
