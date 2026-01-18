@@ -9,9 +9,7 @@ RUN go mod download
 
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -o app MineTracker
+RUN go build -v -o app MineTracker
 
 FROM alpine:latest
 
