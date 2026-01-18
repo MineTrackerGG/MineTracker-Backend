@@ -1,0 +1,122 @@
+name: Build, Release & Publish to ghcr
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+on:
+  push:
+    branches:
+      - release
+      - main
+
+jobs:
+  build_release:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all Git tags
+        run: git fetch --tags
+
+      - name: Check for new commits since last tag
+        if: github.ref == 'refs/heads/release'
+        id: check_commits
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "no_last_tag=true" >> $GITHUB_OUTPUT
+          else
+            NEW_COMMITS=$(git log ${LAST_TAG}..HEAD --oneline)
+            if [ -z "$NEW_COMMITS" ]; then
+              echo "no_new_commits=true" >> $GITHUB_OUTPUT
+            else
+              echo "no_new_commits=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Get next version
+        if: github.ref == 'refs/heads/release' && steps.check_commits.outputs.no_new_commits != 'true'
+        id: version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          release_branches: release
+          tag_prefix: "v"
+          custom_release_rules: |
+            major:major:Breaking Changes
+            minor:minor:Features
+            patch:patch:Bug Fixes or other non-feature changes
+
+      - name: Generate changelog
+        if: github.ref == 'refs/heads/release' && steps.check_commits.outputs.no_new_commits != 'true'
+        id: changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PREV_TAG=${{ steps.check_commits.outputs.last_tag }}
+          CURR_TAG=${{ steps.version.outputs.new_tag }}
+
+          git log ${PREV_TAG}..HEAD --pretty=format:"%H|%s" | while IFS="|" read -r COMMIT_HASH MESSAGE; do
+            AUTHOR_LOGIN=$(gh api repos/${{ github.repository }}/commits/$COMMIT_HASH --jq '.author.login // empty')
+            AUTHOR_NAME=$(gh api repos/${{ github.repository }}/commits/$COMMIT_HASH --jq '.commit.author.name // empty')
+
+            if [[ "$AUTHOR_LOGIN" == *"bot"* ]]; then
+              echo "- $MESSAGE ([${COMMIT_HASH:0:7}](https://github.com/${{ github.repository }}/commit/$COMMIT_HASH)) by $AUTHOR_NAME" >> RELEASE_NOTES.md
+            else
+              if [[ -n "$AUTHOR_LOGIN" ]]; then
+                echo "- $MESSAGE ([${COMMIT_HASH:0:7}](https://github.com/${{ github.repository }}/commit/$COMMIT_HASH)) by @$AUTHOR_LOGIN" >> RELEASE_NOTES.md
+              else
+                echo "- $MESSAGE ([${COMMIT_HASH:0:7}](https://github.com/${{ github.repository }}/commit/$COMMIT_HASH)) by $AUTHOR_NAME" >> RELEASE_NOTES.md
+              fi
+            fi
+          done
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/release' && steps.check_commits.outputs.no_new_commits != 'true'
+        id: github_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          name: "MineTracker-Backend | ${{ steps.version.outputs.new_tag }} Release"
+          body_path: RELEASE_NOTES.md
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Docker tags
+        id: docker_tags
+        run: |
+          SHORT_COMMIT=$(git rev-parse --short HEAD)
+          
+          if [ "${{ github.ref }}" == "refs/heads/release" ]; then
+            if [ "${{ steps.check_commits.outputs.no_new_commits }}" != "true" ]; then
+              VERSION=${{ steps.version.outputs.new_tag }}
+              echo "tags=ghcr.io/${{ github.repository_owner }}/minetracker-backend:${VERSION}+${SHORT_COMMIT},ghcr.io/${{ github.repository_owner }}/minetracker-backend:latest" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "tags=ghcr.io/${{ github.repository_owner }}/minetracker-backend:dev-${SHORT_COMMIT},ghcr.io/${{ github.repository_owner }}/minetracker-backend:dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        if: steps.docker_tags.outputs.tags != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.docker_tags.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
