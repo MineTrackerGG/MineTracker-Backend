@@ -75,7 +75,9 @@ func RegisterGetBulkDatedDataRoute(r *gin.Engine) {
 			}
 
 			if res.dataPoints == nil {
-				result[res.server] = gin.H{"error": "No data found"}
+				result[res.server] = gin.H{
+					"data": []interface{}{},
+				}
 				continue
 			}
 

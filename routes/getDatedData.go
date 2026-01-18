@@ -49,8 +49,12 @@ func RegisterGetDatedDataRoute(r *gin.Engine) {
 			return
 		}
 
+		// return empty result if no data found
 		if dataPoints == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "No data found for server"})
+			c.JSON(http.StatusOK, gin.H{
+				"data": []interface{}{},
+				"step": step,
+			})
 			return
 		}
 

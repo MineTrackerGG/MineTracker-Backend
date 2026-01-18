@@ -53,15 +53,20 @@ func NewServerJob(interval time.Duration, servers []data.PingableServer) *PingJo
 }
 
 func (j *PingJob) StartServerJob(ctx context.Context) {
-	ticker := time.NewTicker(j.interval)
-	defer ticker.Stop()
-
-	j.run()
+	next := time.Now()
 
 	for {
+		next = next.Add(j.interval)
+
+		j.run()
+
+		sleep := time.Until(next)
+		if sleep < 0 {
+			continue
+		}
+
 		select {
-		case <-ticker.C:
-			j.run()
+		case <-time.After(sleep):
 		case <-ctx.Done():
 			util.Logger.Info().Msg("Stopped data ping job.")
 			return
@@ -101,7 +106,10 @@ func (j *PingJob) run() {
 				)
 
 				if err != nil {
+					var failedIpsMu sync.Mutex
+					failedIpsMu.Lock()
 					failedIps = append(failedIps, server.IP)
+					failedIpsMu.Unlock()
 					continue
 				}
 
