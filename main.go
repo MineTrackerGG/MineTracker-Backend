@@ -83,6 +83,7 @@ func main() {
 		}))
 
 		routes.RegisterGetDatedDataRoute(r)
+		routes.RegisterGetBulkDatedDataRoute(r)
 
 		util.Logger.Info().Msg("Started Gin HTTP server on :" + os.Getenv("HTTP_PORT"))
 		if err := r.Run(":" + os.Getenv("HTTP_PORT")); err != nil {
