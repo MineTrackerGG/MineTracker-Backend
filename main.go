@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -20,6 +21,8 @@ import (
 )
 
 func main() {
+	runtime.GOMAXPROCS(6)
+
 	_ = godotenv.Load()
 
 	mongo, ctx, _, err := database.ConnectMongo(os.Getenv("MONGO_URI"))
@@ -52,6 +55,8 @@ func main() {
 	}
 
 	pingJob := task.NewServerJob(1*time.Second, Servers)
+
+	task.StartInfluxWriter(ctx)
 
 	go pingJob.StartServerJob(ctx)
 

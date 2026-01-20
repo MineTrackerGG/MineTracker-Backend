@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
@@ -22,6 +23,11 @@ type PingResult struct {
 	success     bool
 	playerCount int
 }
+
+const (
+	influxQueueSize = 500
+	bulkFlushSize   = 100
+)
 
 func parseAddress(addr string) (host string, port *uint16) {
 	parts := strings.Split(addr, ":")
@@ -74,172 +80,200 @@ func (j *PingJob) StartServerJob(ctx context.Context) {
 	}
 }
 
+var influxQueue = make(chan *write.Point, influxQueueSize)
+var droppedInfluxPoints uint64
+
+func StartInfluxWriter(ctx context.Context) {
+	writeApi := database.InfluxClient.
+		WriteAPI(database.GetInfluxOrg(), database.GetInfluxBucket())
+
+	go func() {
+		defer writeApi.Flush()
+
+		for {
+			select {
+			case point := <-influxQueue:
+				writeApi.WritePoint(point)
+
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func calcWorkerCount(avgPing time.Duration) int {
+	switch {
+	case avgPing < 200*time.Millisecond:
+		return 6
+	case avgPing < 500*time.Millisecond:
+		return 4
+	default:
+		return 2
+	}
+}
+
 func (j *PingJob) run() {
 	pinger := mcping.NewPinger()
 
 	jobs := make(chan data.PingableServer, len(j.servers))
 	results := make(chan data.Server, len(j.servers))
-	failedIps := make([]string, 0)
 
-	workerCount := 10
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	var wg sync.WaitGroup
+	var avgPing = 300 * time.Millisecond
+	workerCount := calcWorkerCount(avgPing)
 
-	// Start workers
+	var wg sync.WaitGroup
+	var pingMu sync.Mutex
+
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			writeApi := database.InfluxClient.WriteAPI(database.GetInfluxOrg(), database.GetInfluxBucket())
-			defer writeApi.Flush()
+
+			collection := database.MongoClient.
+				Database("minetracker").
+				Collection("servers")
+
+			var bulkOps []mongo.WriteModel
 
 			for server := range jobs {
-				host, port := parseAddress(server.IP)
+				start := time.Now()
 
+				host, port := parseAddress(server.IP)
 				resp, err := pinger.PingWithTimeout(
 					host,
 					portOrDefault(port, 25565),
-					time.Second*1,
+					time.Second,
 				)
-
 				if err != nil {
-					var failedIpsMu sync.Mutex
-					failedIpsMu.Lock()
-					failedIps = append(failedIps, server.IP)
-					failedIpsMu.Unlock()
 					continue
 				}
 
-				collection := database.MongoClient.
-					Database("minetracker").
-					Collection("servers")
+				pingTime := time.Since(start)
 
-				var existingServer data.Server
+				// EWMA
+				pingMu.Lock()
+				avgPing = (avgPing*4 + pingTime) / 5
+				pingMu.Unlock()
 
-				err = collection.
-					FindOne(
+				var existing data.Server
+				_ = collection.FindOne(ctx, bson.M{"ip": server.IP}).Decode(&existing)
+
+				existing.Name = server.Name
+				existing.IP = server.IP
+				existing.Type = server.Type
+				existing.Online = true
+
+				pc := resp.PlayerCount.Online
+				if pc > 0 {
+					existing.PlayerCount = pc
+				}
+				if pc > existing.Peak {
+					existing.Peak = pc
+				}
+				if resp.Favicon != "" {
+					existing.Icon = resp.Favicon
+				}
+
+				model := mongo.NewUpdateOneModel().
+					SetFilter(bson.M{"ip": server.IP}).
+					SetUpdate(bson.M{"$set": existing}).
+					SetUpsert(true)
+
+				bulkOps = append(bulkOps, model)
+
+				if len(bulkOps) >= bulkFlushSize {
+					_, _ = collection.BulkWrite(
 						ctx,
-						bson.M{"ip": server.IP},
-					).
-					Decode(&existingServer)
-
-				if err != nil {
-					existingServer = data.Server{
-						Name:        server.Name,
-						IP:          server.IP,
-						Type:        server.Type,
-						Online:      true,
-						PlayerCount: resp.PlayerCount.Online,
-						Peak:        resp.PlayerCount.Online,
-						Icon:        resp.Favicon,
-					}
+						bulkOps,
+						options.BulkWrite().SetOrdered(false),
+					)
+					bulkOps = bulkOps[:0]
 				}
 
-				existingServer.Online = true
-				playerCount := resp.PlayerCount.Online
-				if playerCount > 0 {
-					existingServer.PlayerCount = playerCount
-				}
-
-				if resp.Favicon != existingServer.Icon {
-					existingServer.Icon = resp.Favicon
-				}
-
-				if resp.PlayerCount.Online > existingServer.Peak {
-					existingServer.Peak = resp.PlayerCount.Online
-				}
-
-				opts := options.UpdateOne().SetUpsert(true)
-
-				_, err = collection.UpdateOne(
-					ctx,
-					bson.M{"ip": server.IP},
-					bson.M{"$set": existingServer},
-					opts,
+				point := write.NewPoint(
+					"server_data",
+					map[string]string{
+						"ip":   server.IP,
+						"type": server.Type,
+						"name": server.Name,
+					},
+					map[string]interface{}{
+						"player_count": existing.PlayerCount,
+					},
+					time.Now(),
 				)
 
-				if err != nil {
-					util.Logger.Error().Err(err).Msg("Failed to update server data in MongoDB")
-					continue
+				select {
+				case influxQueue <- point:
+				default:
+					atomic.AddUint64(&droppedInfluxPoints, 1)
 				}
 
-				tags := map[string]string{
-					"ip":   server.IP,
-					"type": server.Type,
-					"name": server.Name,
-				}
+				results <- existing
+			}
 
-				fields := map[string]interface{}{
-					"player_count": existingServer.PlayerCount,
-				}
-
-				point := write.NewPoint("server_data", tags, fields, time.Now())
-
-				websocket.GlobalHub.Broadcast(map[string]interface{}{
-					"type": "data_point_add",
-					"data": data.ServerDataPoint{
-						Timestamp:   point.Time().Unix(),
-						PlayerCount: existingServer.PlayerCount,
-						Ip:          server.IP,
-						Name:        server.Name,
-					},
-				})
-
-				writeApi.WritePoint(point)
-
-				results <- existingServer
+			if len(bulkOps) > 0 {
+				_, _ = collection.BulkWrite(
+					ctx,
+					bulkOps,
+					options.BulkWrite().SetOrdered(false),
+				)
 			}
 		}()
 	}
 
-	// Feed jobs
-	go func() {
-		for _, server := range j.servers {
-			jobs <- server
-		}
-		close(jobs)
-	}()
+	for _, s := range j.servers {
+		jobs <- s
+	}
+	close(jobs)
 
-	// Close results when all workers are done
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	var allResults []data.Server
-	for result := range results {
-		allResults = append(allResults, result)
+	// WS Batch
+	var wsBatch []data.ServerDataPoint
+	now := time.Now().Unix()
+
+	for s := range results {
+		wsBatch = append(wsBatch, data.ServerDataPoint{
+			Timestamp:   now,
+			PlayerCount: s.PlayerCount,
+			Ip:          s.IP,
+			Name:        s.Name,
+		})
+	}
+
+	if len(wsBatch) > 0 {
+		websocket.GlobalHub.Broadcast(map[string]interface{}{
+			"type": "data_point_batch",
+			"data": wsBatch,
+		})
 	}
 
 	cursor, err := database.MongoClient.
 		Database("minetracker").
 		Collection("servers").
 		Find(ctx, bson.M{})
-
 	if err != nil {
-		util.Logger.Error().Err(err).Msg("Failed to fetch servers for returning all servers")
 		return
 	}
 	defer func(cursor *mongo.Cursor, ctx context.Context) {
-		err := cursor.Close(ctx)
-		if err != nil {
-			util.Logger.Error().Err(err).Msg("Failed to close MongoDB cursor")
-		}
+		_ = cursor.Close(ctx)
 	}(cursor, ctx)
 
-	var allServers []data.Server
-	if err := cursor.All(ctx, &allServers); err != nil {
-		util.Logger.Error().Err(err).Msg("Failed to decode servers for returning all servers")
+	var all []data.Server
+	if err := cursor.All(ctx, &all); err != nil {
 		return
 	}
 
-	websocket.GlobalHub.Broadcast(
-		map[string]interface{}{
-			"type":    "servers_update",
-			"servers": allServers,
-		},
-	)
+	websocket.GlobalHub.Broadcast(map[string]interface{}{
+		"type":    "servers_update",
+		"servers": all,
+	})
 }
