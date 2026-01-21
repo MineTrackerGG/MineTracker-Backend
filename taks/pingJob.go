@@ -152,6 +152,16 @@ func (j *PingJob) run() {
 					continue
 				}
 
+				websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
+					"type": "data_point_rt",
+					"data": data.ServerDataPoint{
+						Timestamp:   time.Now().Unix(),
+						PlayerCount: resp.PlayerCount.Online,
+						Ip:          server.IP,
+						Name:        server.Name,
+					},
+				})
+
 				pingTime := time.Since(start)
 
 				// EWMA

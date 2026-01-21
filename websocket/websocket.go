@@ -2,9 +2,8 @@ package websocket
 
 import (
 	"MineTracker/util"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -22,14 +21,16 @@ var upgrader = websocket.Upgrader{
 }
 
 type Hub struct {
-	clients map[*websocket.Conn]bool
-	writeMu map[*websocket.Conn]*sync.Mutex
-	mu      sync.RWMutex
+	clients       map[*websocket.Conn]bool
+	writeMu       map[*websocket.Conn]*sync.Mutex
+	subscriptions map[string]map[*websocket.Conn]bool
+	mu            sync.RWMutex
 }
 
 var GlobalHub = &Hub{
-	clients: make(map[*websocket.Conn]bool),
-	writeMu: make(map[*websocket.Conn]*sync.Mutex),
+	clients:       make(map[*websocket.Conn]bool),
+	writeMu:       make(map[*websocket.Conn]*sync.Mutex),
+	subscriptions: make(map[string]map[*websocket.Conn]bool),
 }
 
 func (h *Hub) Register(conn *websocket.Conn) {
@@ -42,36 +43,58 @@ func (h *Hub) Register(conn *websocket.Conn) {
 func (h *Hub) Unregister(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	delete(h.clients, conn)
 	delete(h.writeMu, conn)
+
+	for _, subs := range h.subscriptions {
+		delete(subs, conn)
+	}
 }
 
-func (h *Hub) WriteJSON(conn *websocket.Conn, v interface{}) error {
-	h.mu.RLock()
-	m := h.writeMu[conn]
-	h.mu.RUnlock()
+func (h *Hub) Subscribe(conn *websocket.Conn, ip string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
+	if h.subscriptions[ip] == nil {
+		h.subscriptions[ip] = make(map[*websocket.Conn]bool)
+	}
+	h.subscriptions[ip][conn] = true
+}
+
+func (h *Hub) Unsubscribe(conn *websocket.Conn, ip string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if subs, ok := h.subscriptions[ip]; ok {
+		delete(subs, conn)
+		if len(subs) == 0 {
+			delete(h.subscriptions, ip)
+		}
+	}
+}
+
+func (h *Hub) writeJSONLocked(conn *websocket.Conn, v interface{}) error {
+	m := h.writeMu[conn]
 	if m == nil {
 		return fmt.Errorf("connection not registered")
 	}
-
 	m.Lock()
 	defer m.Unlock()
 	return conn.WriteJSON(v)
 }
 
-func (h *Hub) WriteMessage(conn *websocket.Conn, messageType int, data []byte) error {
+func (h *Hub) SendToServer(ip string, message interface{}) {
 	h.mu.RLock()
-	m := h.writeMu[conn]
+	conns := h.subscriptions[ip]
 	h.mu.RUnlock()
 
-	if m == nil {
-		return fmt.Errorf("connection not registered")
+	for conn := range conns {
+		if err := h.writeJSONLocked(conn, message); err != nil {
+			h.Unregister(conn)
+			_ = conn.Close()
+		}
 	}
-
-	m.Lock()
-	defer m.Unlock()
-	return conn.WriteMessage(messageType, data)
 }
 
 func (h *Hub) Broadcast(message interface{}) {
@@ -83,61 +106,48 @@ func (h *Hub) Broadcast(message interface{}) {
 	h.mu.RUnlock()
 
 	for _, conn := range conns {
-		if err := h.WriteJSON(conn, message); err != nil {
-			isExpectedClose := websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) ||
-				errors.Is(err, websocket.ErrCloseSent) || errors.Is(err, websocket.ErrCloseSent) || errors.Is(err, net.ErrClosed)
-
-			if isExpectedClose {
-				h.Unregister(conn)
-				if cerr := conn.Close(); cerr != nil {
-					if !(websocket.IsCloseError(cerr, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) ||
-						errors.Is(cerr, websocket.ErrCloseSent) || errors.Is(cerr, websocket.ErrCloseSent) || errors.Is(cerr, net.ErrClosed)) {
-						util.Logger.Error().Err(cerr).Msg("Error closing client connection")
-					}
-				}
-				continue
-			}
+		if err := h.writeJSONLocked(conn, message); err != nil {
 			h.Unregister(conn)
-			if cerr := conn.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
-				util.Logger.Error().Err(cerr).Msg("Error closing client connection")
-			}
+			_ = conn.Close()
 		}
 	}
+}
+
+type WSMessage struct {
+	Type string `json:"type"`
+	IP   string `json:"ip,omitempty"`
 }
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		util.Logger.Error().Err(err).Msg("Error while upgrading to websocket")
+		util.Logger.Error().Err(err).Msg("WS upgrade failed")
 		return
 	}
 
 	GlobalHub.Register(conn)
-
-	defer func(conn *websocket.Conn) {
+	defer func() {
 		GlobalHub.Unregister(conn)
-		if err := conn.Close(); err != nil {
-			if !(websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || errors.Is(err, net.ErrClosed)) {
-				util.Logger.Error().Err(err).Msg("Error while closing connection")
-			}
-		}
-	}(conn)
+		_ = conn.Close()
+	}()
 
 	for {
-		messageType, message, err := conn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) || errors.Is(err, net.ErrClosed) {
-				// Expected close
-			} else {
-				util.Logger.Error().Err(err).Msg("Error while reading")
-			}
 			break
 		}
-		util.Logger.Info().Str("type", string(rune(messageType))).Msg("Got message")
 
-		if err = GlobalHub.WriteMessage(conn, messageType, message); err != nil {
-			util.Logger.Error().Err(err).Msg("Error while writing")
-			break
+		var msg WSMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "subscribe_server":
+			GlobalHub.Subscribe(conn, msg.IP)
+
+		case "unsubscribe_server":
+			GlobalHub.Unsubscribe(conn, msg.IP)
 		}
 	}
 }
