@@ -18,6 +18,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func main() {
@@ -51,6 +52,21 @@ func main() {
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to load servers.json")
 	}
+
+	collection := database.MongoClient.Database("minetracker").Collection("servers")
+	cursor, err := collection.Find(context.Background(), bson.M{})
+	if err != nil {
+		util.Logger.Fatal().Err(err).Msg("Failed to retrieve servers from MongoDB")
+		return
+	}
+	var servers []data.Server
+	if err := cursor.All(context.Background(), &servers); err != nil {
+		util.Logger.Fatal().Err(err).Msg("Failed to parse servers from MongoDB")
+		return
+	}
+
+	data.Servers = servers // Update the global Servers variable with data from MongoDB
+	cursor.Close(context.Background())
 
 	pingJob := task.NewServerJob(0, Servers) // interval unused now
 

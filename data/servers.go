@@ -42,6 +42,8 @@ type ServerDataPoint struct {
 	Name        string `json:"name"`
 }
 
+var Servers []Server
+
 func LoadServers(path string) ([]PingableServer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
