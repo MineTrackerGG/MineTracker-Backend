@@ -24,6 +24,7 @@ type Hub struct {
 	clients       map[*websocket.Conn]bool
 	writeMu       map[*websocket.Conn]*sync.Mutex
 	subscriptions map[string]map[*websocket.Conn]bool
+	subNotify     map[string]chan bool // Notify channels for subscription changes
 	mu            sync.RWMutex
 }
 
@@ -31,6 +32,7 @@ var GlobalHub = &Hub{
 	clients:       make(map[*websocket.Conn]bool),
 	writeMu:       make(map[*websocket.Conn]*sync.Mutex),
 	subscriptions: make(map[string]map[*websocket.Conn]bool),
+	subNotify:     make(map[string]chan bool),
 }
 
 func (h *Hub) Register(conn *websocket.Conn) {
@@ -47,8 +49,22 @@ func (h *Hub) Unregister(conn *websocket.Conn) {
 	delete(h.clients, conn)
 	delete(h.writeMu, conn)
 
-	for _, subs := range h.subscriptions {
-		delete(subs, conn)
+	// Check each subscription and notify if this was the last subscriber
+	for ip, subs := range h.subscriptions {
+		if subs[conn] {
+			delete(subs, conn)
+
+			// Notify if this was last subscriber
+			if len(subs) == 0 {
+				delete(h.subscriptions, ip)
+				if h.subNotify[ip] != nil {
+					select {
+					case h.subNotify[ip] <- false:
+					default:
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -59,7 +75,17 @@ func (h *Hub) Subscribe(conn *websocket.Conn, ip string) {
 	if h.subscriptions[ip] == nil {
 		h.subscriptions[ip] = make(map[*websocket.Conn]bool)
 	}
+
+	wasEmpty := len(h.subscriptions[ip]) == 0
 	h.subscriptions[ip][conn] = true
+
+	// Notify server goroutine if this is first subscriber
+	if wasEmpty && h.subNotify[ip] != nil {
+		select {
+		case h.subNotify[ip] <- true:
+		default:
+		}
+	}
 }
 
 func (h *Hub) Unsubscribe(conn *websocket.Conn, ip string) {
@@ -68,10 +94,47 @@ func (h *Hub) Unsubscribe(conn *websocket.Conn, ip string) {
 
 	if subs, ok := h.subscriptions[ip]; ok {
 		delete(subs, conn)
+
+		// Notify server goroutine if this was last subscriber
 		if len(subs) == 0 {
 			delete(h.subscriptions, ip)
+			if h.subNotify[ip] != nil {
+				select {
+				case h.subNotify[ip] <- false:
+				default:
+				}
+			}
 		}
 	}
+}
+
+func (h *Hub) RegisterServerNotify(ip string) chan bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.subNotify[ip] == nil {
+		h.subNotify[ip] = make(chan bool, 10)
+	}
+	return h.subNotify[ip]
+}
+
+func (h *Hub) IsSubscribed(ip string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.subscriptions[ip]) > 0
+}
+
+func (h *Hub) GetSubscribedIPs() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	ips := make([]string, 0, len(h.subscriptions))
+	for ip, conns := range h.subscriptions {
+		if len(conns) > 0 {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
 }
 
 func (h *Hub) writeJSONLocked(conn *websocket.Conn, v interface{}) error {

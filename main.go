@@ -48,15 +48,19 @@ func main() {
 
 	Servers, err := data.LoadServers("servers.json")
 
-	data.Servers = Servers
-
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to load servers.json")
 	}
 
-	pingJob := task.NewServerJob(1*time.Second, Servers)
+	pingJob := task.NewServerJob(0, Servers) // interval unused now
 
 	task.StartInfluxWriter(ctx)
+	task.StartDBWriter(ctx)
+
+	err = task.LoadServerCache(ctx)
+	if err != nil {
+		util.Logger.Warn().Err(err).Msg("Failed to load server cache from MongoDB")
+	}
 
 	go pingJob.StartServerJob(ctx)
 
@@ -88,6 +92,7 @@ func main() {
 
 		routes.RegisterGetDatedDataRoute(r)
 		routes.RegisterGetBulkDatedDataRoute(r)
+		routes.RegisterGetServers(r)
 
 		r.GET("/ws", func(c *gin.Context) {
 			websocket.HandleWebSocket(c.Writer, c.Request)

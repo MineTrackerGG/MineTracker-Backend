@@ -25,9 +25,17 @@ type PingResult struct {
 }
 
 const (
-	influxQueueSize = 500
-	bulkFlushSize   = 100
+	influxQueueSize  = 500
+	bulkFlushSize    = 300
+	dbWriteQueueSize = 1000
 )
+
+type dbWriteOp struct {
+	server data.Server
+}
+
+var dbWriteQueue = make(chan dbWriteOp, dbWriteQueueSize)
+var serverCache sync.Map
 
 func parseAddress(addr string) (host string, port *uint16) {
 	parts := strings.Split(addr, ":")
@@ -59,22 +67,79 @@ func NewServerJob(interval time.Duration, servers []data.PingableServer) *PingJo
 }
 
 func (j *PingJob) StartServerJob(ctx context.Context) {
-	next := time.Now()
+	var wg sync.WaitGroup
 
-	for {
-		next = next.Add(j.interval)
+	// Start individual goroutine for each server
+	for _, server := range j.servers {
+		wg.Add(1)
+		go func(srv data.PingableServer) {
+			defer wg.Done()
+			j.runServerLoop(ctx, srv)
+		}(server)
+	}
 
-		j.run()
+	<-ctx.Done()
+	util.Logger.Info().Msg("Stopped data ping job.")
+	wg.Wait()
+}
 
-		sleep := time.Until(next)
-		if sleep < 0 {
-			continue
+func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer) {
+	// Register for subscription change notifications
+	notifyChan := websocket.GlobalHub.RegisterServerNotify(server.IP)
+
+	// Custom interval from config (optional)
+	var customInterval time.Duration
+	if server.Interval > 0 {
+		customInterval = time.Duration(server.Interval) * time.Second
+	}
+
+	// Adaptive ticker - starts at 10 seconds, adjusts based on subscriptions
+	getCurrentInterval := func() time.Duration {
+		if customInterval > 0 {
+			return customInterval
 		}
 
+		// Check if anyone is subscribed to this server
+		if websocket.GlobalHub.IsSubscribed(server.IP) {
+			return 1 * time.Second // Fast updates for subscribed servers
+		}
+		return 10 * time.Second // Slow updates for unsubscribed servers
+	}
+
+	ticker := time.NewTicker(getCurrentInterval())
+	defer ticker.Stop()
+
+	// Ping immediately on start
+	j.pingServer(server)
+
+	lastInterval := getCurrentInterval()
+
+	for {
 		select {
-		case <-time.After(sleep):
+		case <-ticker.C:
+			j.pingServer(server)
+
+			// Check if interval needs adjustment after ping
+			newInterval := getCurrentInterval()
+			if newInterval != lastInterval {
+				ticker.Reset(newInterval)
+				lastInterval = newInterval
+			}
+
+		case <-notifyChan:
+			// Subscription status changed - immediately adjust interval
+			newInterval := getCurrentInterval()
+			if newInterval != lastInterval {
+				ticker.Reset(newInterval)
+				lastInterval = newInterval
+
+				// Ping immediately on subscription to give instant data
+				if newInterval < lastInterval {
+					j.pingServer(server)
+				}
+			}
+
 		case <-ctx.Done():
-			util.Logger.Info().Msg("Stopped data ping job.")
 			return
 		}
 	}
@@ -82,6 +147,29 @@ func (j *PingJob) StartServerJob(ctx context.Context) {
 
 var influxQueue = make(chan *write.Point, influxQueueSize)
 var droppedInfluxPoints uint64
+
+func LoadServerCache(ctx context.Context) error {
+	collection := database.MongoClient.
+		Database("minetracker").
+		Collection("servers")
+
+	cursor, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	var servers []data.Server
+	if err := cursor.All(ctx, &servers); err != nil {
+		return err
+	}
+
+	for _, server := range servers {
+		serverCache.Store(server.IP, server)
+	}
+
+	return nil
+}
 
 func StartInfluxWriter(ctx context.Context) {
 	writeApi := database.InfluxClient.
@@ -102,188 +190,137 @@ func StartInfluxWriter(ctx context.Context) {
 	}()
 }
 
-func calcWorkerCount(avgPing time.Duration) int {
-	switch {
-	case avgPing < 200*time.Millisecond:
-		return 6
-	case avgPing < 500*time.Millisecond:
-		return 4
-	default:
-		return 2
-	}
-}
+func StartDBWriter(ctx context.Context) {
+	collection := database.MongoClient.
+		Database("minetracker").
+		Collection("servers")
 
-func (j *PingJob) run() {
-	pinger := mcping.NewPinger()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
 
-	jobs := make(chan data.PingableServer, len(j.servers))
-	results := make(chan data.Server, len(j.servers))
+		var bulkOps []mongo.WriteModel
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	var avgPing = 300 * time.Millisecond
-	workerCount := calcWorkerCount(avgPing)
-
-	var wg sync.WaitGroup
-	var pingMu sync.Mutex
-
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			collection := database.MongoClient.
-				Database("minetracker").
-				Collection("servers")
-
-			var bulkOps []mongo.WriteModel
-
-			for server := range jobs {
-				start := time.Now()
-
-				host, port := parseAddress(server.IP)
-				resp, err := pinger.PingWithTimeout(
-					host,
-					portOrDefault(port, 25565),
-					time.Second,
-				)
-				if err != nil {
-					continue
-				}
-
-				websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
-					"type": "data_point_rt",
-					"data": data.ServerDataPoint{
-						Timestamp:   time.Now().Unix(),
-						PlayerCount: resp.PlayerCount.Online,
-						Ip:          server.IP,
-						Name:        server.Name,
-					},
-				})
-
-				pingTime := time.Since(start)
-
-				// EWMA
-				pingMu.Lock()
-				avgPing = (avgPing*4 + pingTime) / 5
-				pingMu.Unlock()
-
-				var existing data.Server
-				_ = collection.FindOne(ctx, bson.M{"ip": server.IP}).Decode(&existing)
-
-				existing.Name = server.Name
-				existing.IP = server.IP
-				existing.Type = server.Type
-				existing.Online = true
-
-				pc := resp.PlayerCount.Online
-				if pc > 0 {
-					existing.PlayerCount = pc
-				}
-				if pc > existing.Peak {
-					existing.Peak = pc
-				}
-				if resp.Favicon != "" {
-					existing.Icon = resp.Favicon
-				}
-
-				model := mongo.NewUpdateOneModel().
-					SetFilter(bson.M{"ip": server.IP}).
-					SetUpdate(bson.M{"$set": existing}).
-					SetUpsert(true)
-
-				bulkOps = append(bulkOps, model)
-
-				if len(bulkOps) >= bulkFlushSize {
-					_, _ = collection.BulkWrite(
-						ctx,
-						bulkOps,
-						options.BulkWrite().SetOrdered(false),
-					)
-					bulkOps = bulkOps[:0]
-				}
-
-				point := write.NewPoint(
-					"server_data",
-					map[string]string{
-						"ip":   server.IP,
-						"type": server.Type,
-						"name": server.Name,
-					},
-					map[string]interface{}{
-						"player_count": existing.PlayerCount,
-					},
-					time.Now(),
-				)
-
-				select {
-				case influxQueue <- point:
-				default:
-					atomic.AddUint64(&droppedInfluxPoints, 1)
-				}
-
-				results <- existing
-			}
-
+		flush := func() {
 			if len(bulkOps) > 0 {
 				_, _ = collection.BulkWrite(
 					ctx,
 					bulkOps,
 					options.BulkWrite().SetOrdered(false),
 				)
+				bulkOps = bulkOps[:0]
 			}
-		}()
-	}
+		}
 
-	for _, s := range j.servers {
-		jobs <- s
-	}
-	close(jobs)
+		for {
+			select {
+			case op := <-dbWriteQueue:
+				model := mongo.NewUpdateOneModel().
+					SetFilter(bson.M{"ip": op.server.IP}).
+					SetUpdate(bson.M{"$set": op.server}).
+					SetUpsert(true)
+				bulkOps = append(bulkOps, model)
 
-	go func() {
-		wg.Wait()
-		close(results)
+				if len(bulkOps) >= bulkFlushSize {
+					flush()
+				}
+
+			case <-ticker.C:
+				flush()
+
+			case <-ctx.Done():
+				flush()
+				return
+			}
+		}
 	}()
+}
 
-	// WS Batch
-	var wsBatch []data.ServerDataPoint
-	now := time.Now().Unix()
+func (j *PingJob) pingServer(server data.PingableServer) {
+	pinger := mcping.NewPinger()
 
-	for s := range results {
-		wsBatch = append(wsBatch, data.ServerDataPoint{
-			Timestamp:   now,
-			PlayerCount: s.PlayerCount,
-			Ip:          s.IP,
-			Name:        s.Name,
-		})
-	}
-
-	if len(wsBatch) > 0 {
-		websocket.GlobalHub.Broadcast(map[string]interface{}{
-			"type": "data_point_batch",
-			"data": wsBatch,
-		})
-	}
-
-	cursor, err := database.MongoClient.
-		Database("minetracker").
-		Collection("servers").
-		Find(ctx, bson.M{})
+	host, port := parseAddress(server.IP)
+	resp, err := pinger.PingWithTimeout(
+		host,
+		portOrDefault(port, 25565),
+		2*time.Second,
+	)
 	if err != nil {
+		// Server offline, still update cache
+		if cached, ok := serverCache.Load(server.IP); ok {
+			existing := cached.(data.Server)
+			existing.Online = false
+			serverCache.Store(server.IP, existing)
+
+			select {
+			case dbWriteQueue <- dbWriteOp{server: existing}:
+			default:
+			}
+		}
 		return
 	}
-	defer func(cursor *mongo.Cursor, ctx context.Context) {
-		_ = cursor.Close(ctx)
-	}(cursor, ctx)
 
-	var all []data.Server
-	if err := cursor.All(ctx, &all); err != nil {
-		return
-	}
+	pc := resp.PlayerCount.Online
 
-	websocket.GlobalHub.Broadcast(map[string]interface{}{
-		"type":    "servers_update",
-		"servers": all,
+	// INSTANT WebSocket update - happens immediately when ping completes
+	websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
+		"type": "data_point_rt",
+		"data": data.ServerDataPoint{
+			Timestamp:   time.Now().Unix(),
+			PlayerCount: pc,
+			Ip:          server.IP,
+			Name:        server.Name,
+		},
 	})
+
+	// Get cached server data or create new
+	var existing data.Server
+	if cached, ok := serverCache.Load(server.IP); ok {
+		existing = cached.(data.Server)
+	}
+
+	existing.Name = server.Name
+	existing.IP = server.IP
+	existing.Type = server.Type
+	existing.Online = true
+
+	if pc > 0 {
+		existing.PlayerCount = pc
+	}
+	if pc > existing.Peak {
+		existing.Peak = pc
+	}
+	if resp.Favicon != "" {
+		existing.Icon = resp.Favicon
+	}
+
+	// Update cache
+	serverCache.Store(server.IP, existing)
+
+	// Queue async DB write (non-blocking)
+	select {
+	case dbWriteQueue <- dbWriteOp{server: existing}:
+	default:
+		// Queue full, skip this write
+	}
+
+	// Queue InfluxDB write (non-blocking)
+	point := write.NewPoint(
+		"server_data",
+		map[string]string{
+			"ip":   server.IP,
+			"type": server.Type,
+			"name": server.Name,
+		},
+		map[string]interface{}{
+			"player_count": pc,
+		},
+		time.Now(),
+	)
+
+	select {
+	case influxQueue <- point:
+	default:
+		atomic.AddUint64(&droppedInfluxPoints, 1)
+	}
 }

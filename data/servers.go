@@ -9,9 +9,10 @@ import (
 )
 
 type PingableServer struct {
-	Name string `json:"name"`
-	IP   string `json:"ip"`
-	Type string `json:"type"`
+	Name     string `json:"name"`
+	IP       string `json:"ip"`
+	Type     string `json:"type"`
+	Interval int    `json:"interval,omitempty"` // Ping interval in seconds, defaults to 5
 }
 
 type Server struct {
@@ -40,8 +41,6 @@ type ServerDataPoint struct {
 	Ip          string `json:"ip"`
 	Name        string `json:"name"`
 }
-
-var Servers []PingableServer
 
 func LoadServers(path string) ([]PingableServer, error) {
 	data, err := os.ReadFile(path)
