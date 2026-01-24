@@ -62,6 +62,13 @@ func main() {
 	data.Servers = servers // Update the global Servers variable with data from MongoDB
 	cursor.Close(context.Background())
 
+	pingJob := task.NewServerJob(0, Servers) // interval unused now
+
+	task.StartInfluxWriter(ctx)
+	task.StartDBWriter(ctx)
+
+	go pingJob.StartServerJob(ctx)
+
 	err = task.LoadServerCache(ctx)
 	if err != nil {
 		util.Logger.Warn().Err(err).Msg("Failed to load server cache from MongoDB")
