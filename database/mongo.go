@@ -1,6 +1,7 @@
 package database
 
 import (
+	"MineTracker/util"
 	"context"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 
 var MongoClient *mongo.Client
 
-func ConnectMongo(uri string) (*mongo.Client, context.Context, context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func ConnectMongo(uri string) {
+	ctx := context.Background()
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
 	clientOptions := options.Client().ApplyURI(uri).
 		SetServerAPIOptions(serverAPI).
@@ -22,15 +23,19 @@ func ConnectMongo(uri string) (*mongo.Client, context.Context, context.CancelFun
 		SetConnectTimeout(10 * time.Second)
 	client, err := mongo.Connect(clientOptions)
 	if err != nil {
-		cancel()
-		return nil, nil, nil, err
+		return
+	}
+
+	if client == nil {
+		util.Logger.Fatal().Msg("MongoDB client is nil")
+		return
 	}
 
 	err = client.Ping(ctx, nil)
 	if err != nil {
-		cancel()
-		return nil, nil, nil, err
+		util.Logger.Fatal().Err(err).Msg("Failed to connect to MongoDB")
+		return
 	}
 
-	return client, ctx, cancel, nil
+	MongoClient = client
 }

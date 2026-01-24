@@ -74,6 +74,7 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 	}
 
 	result, err := queryApi.Query(context.Background(), query)
+
 	if err != nil {
 		return nil, "0m", fmt.Errorf("query execution failed: %w", err)
 	}

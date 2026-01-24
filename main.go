@@ -4,7 +4,7 @@ import (
 	"MineTracker/data"
 	"MineTracker/database"
 	"MineTracker/routes"
-	task "MineTracker/taks"
+	task "MineTracker/task"
 	"MineTracker/util"
 	"MineTracker/websocket"
 	"context"
@@ -26,20 +26,14 @@ func main() {
 
 	_ = godotenv.Load()
 
-	mongo, ctx, _, err := database.ConnectMongo(os.Getenv("MONGO_URI"))
-	if err != nil {
-		util.Logger.Fatal().Err(err).Msg("Failed to connect to MongoDB")
-		panic(err)
-	}
+	database.ConnectMongo(os.Getenv("MONGO_URI"))
 
 	ctx, serverJobCancel := context.WithCancel(context.Background())
-
-	database.MongoClient = mongo
 
 	// check if connected to mongodb
 	util.Logger.Info().Msg("Connected to MongoDB!")
 
-	err = database.ConnectInflux()
+	err := database.ConnectInflux()
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to connect to InfluxDB")
 		panic(err)
@@ -68,17 +62,10 @@ func main() {
 	data.Servers = servers // Update the global Servers variable with data from MongoDB
 	cursor.Close(context.Background())
 
-	pingJob := task.NewServerJob(0, Servers) // interval unused now
-
-	task.StartInfluxWriter(ctx)
-	task.StartDBWriter(ctx)
-
 	err = task.LoadServerCache(ctx)
 	if err != nil {
 		util.Logger.Warn().Err(err).Msg("Failed to load server cache from MongoDB")
 	}
-
-	go pingJob.StartServerJob(ctx)
 
 	err = data.InitCache()
 	if err != nil {
@@ -125,6 +112,7 @@ func main() {
 	defer stop()
 
 	<-ctx.Done()
+	database.MongoClient.Disconnect(ctx)
 	serverJobCancel()
 	util.Logger.Info().Msg("Shutting down MineTracker...")
 }
