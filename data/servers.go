@@ -66,7 +66,7 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 		ServerFilter:  ip,
 		MaxDataPoints: 500,
 		MinDataPoints: 10,
-		UseAdaptive:   true,
+		UseAdaptive:   false,
 	})
 
 	if err != nil {
