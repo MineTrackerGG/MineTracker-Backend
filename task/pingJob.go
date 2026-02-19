@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
+	mctypes "github.com/iverly/go-mcping/api/types"
 	"github.com/iverly/go-mcping/mcping"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -22,6 +23,13 @@ import (
 type PingResult struct {
 	success     bool
 	playerCount int
+}
+
+// serverPinger abstracts mcping's unexported pinger type so it can be reused
+// across calls without being re-created (and re-allocating its DNS resolver)
+// on every tick.
+type serverPinger interface {
+	PingWithTimeout(host string, port uint16, timeout time.Duration) (*mctypes.PingResponse, error)
 }
 
 const (
@@ -86,6 +94,8 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 	notifyChan := websocket.GlobalHub.RegisterServerNotify(server.IP)
 	defer websocket.GlobalHub.UnregisterServerNotify(server.IP)
 
+	pinger := mcping.NewPinger()
+
 	var customInterval time.Duration
 	if server.Interval > 0 {
 		customInterval = time.Duration(server.Interval) * time.Second
@@ -105,14 +115,14 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 	ticker := time.NewTicker(getCurrentInterval())
 	defer ticker.Stop()
 
-	j.pingServer(server)
+	j.pingServer(server, pinger)
 
 	lastInterval := getCurrentInterval()
 
 	for {
 		select {
 		case <-ticker.C:
-			j.pingServer(server)
+			j.pingServer(server, pinger)
 
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
@@ -130,7 +140,7 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 				lastInterval = newInterval
 
 				if newInterval < lastInterval {
-					j.pingServer(server)
+					j.pingServer(server, pinger)
 				}
 			}
 
@@ -266,9 +276,7 @@ func StartDBWriter(ctx context.Context) {
 	}()
 }
 
-func (j *PingJob) pingServer(server data.PingableServer) {
-	pinger := mcping.NewPinger()
-
+func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 	host, port := parseAddress(server.IP)
 	resp, err := pinger.PingWithTimeout(
 		host,

@@ -155,10 +155,14 @@ func (h *Hub) writeJSONLocked(conn *websocket.Conn, v interface{}) error {
 
 func (h *Hub) SendToServer(ip string, message interface{}) {
 	h.mu.RLock()
-	conns := h.subscriptions[ip]
+	subs := h.subscriptions[ip]
+	conns := make([]*websocket.Conn, 0, len(subs))
+	for conn := range subs {
+		conns = append(conns, conn)
+	}
 	h.mu.RUnlock()
 
-	for conn := range conns {
+	for _, conn := range conns {
 		if err := h.writeJSONLocked(conn, message); err != nil {
 			h.Unregister(conn)
 			_ = conn.Close()
