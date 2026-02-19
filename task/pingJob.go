@@ -86,6 +86,7 @@ func (j *PingJob) StartServerJob(ctx context.Context) {
 func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer) {
 	// Register for subscription change notifications
 	notifyChan := websocket.GlobalHub.RegisterServerNotify(server.IP)
+	defer websocket.GlobalHub.UnregisterServerNotify(server.IP)
 
 	// Custom interval from config (optional)
 	var customInterval time.Duration
@@ -126,7 +127,11 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 				lastInterval = newInterval
 			}
 
-		case <-notifyChan:
+		case _, ok := <-notifyChan:
+			if !ok {
+				// Channel closed, exit
+				return
+			}
 			// Subscription status changed - immediately adjust interval
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
@@ -180,11 +185,25 @@ func StartInfluxWriter(ctx context.Context) {
 
 		for {
 			select {
-			case point := <-influxQueue:
+			case point, ok := <-influxQueue:
+				if !ok {
+					return
+				}
 				writeApi.WritePoint(point)
 
 			case <-ctx.Done():
-				return
+				// Drain remaining points before exiting
+				for {
+					select {
+					case point, ok := <-influxQueue:
+						if !ok {
+							return
+						}
+						writeApi.WritePoint(point)
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -214,7 +233,11 @@ func StartDBWriter(ctx context.Context) {
 
 		for {
 			select {
-			case op := <-dbWriteQueue:
+			case op, ok := <-dbWriteQueue:
+				if !ok {
+					flush()
+					return
+				}
 				model := mongo.NewUpdateOneModel().
 					SetFilter(bson.M{"ip": op.server.IP}).
 					SetUpdate(bson.M{"$set": op.server}).
@@ -229,8 +252,27 @@ func StartDBWriter(ctx context.Context) {
 				flush()
 
 			case <-ctx.Done():
+				// Drain remaining operations before exiting
 				flush()
-				return
+				for {
+					select {
+					case op, ok := <-dbWriteQueue:
+						if !ok {
+							return
+						}
+						model := mongo.NewUpdateOneModel().
+							SetFilter(bson.M{"ip": op.server.IP}).
+							SetUpdate(bson.M{"$set": op.server}).
+							SetUpsert(true)
+						bulkOps = append(bulkOps, model)
+						if len(bulkOps) >= bulkFlushSize {
+							flush()
+						}
+					default:
+						flush()
+						return
+					}
+				}
 			}
 		}
 	}()

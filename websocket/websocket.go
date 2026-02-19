@@ -118,6 +118,16 @@ func (h *Hub) RegisterServerNotify(ip string) chan bool {
 	return h.subNotify[ip]
 }
 
+func (h *Hub) UnregisterServerNotify(ip string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if ch, ok := h.subNotify[ip]; ok {
+		close(ch)
+		delete(h.subNotify, ip)
+	}
+}
+
 func (h *Hub) IsSubscribed(ip string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

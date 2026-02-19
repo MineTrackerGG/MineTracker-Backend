@@ -8,6 +8,8 @@ import (
 	"MineTracker/util"
 	"MineTracker/websocket"
 	"context"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
@@ -113,6 +115,15 @@ func main() {
 			util.Logger.Fatal().Err(err).Msg("Server crashed")
 		}
 	}()
+
+	if os.Getenv("PROFILING_ENABLED") == "true" {
+		go func() {
+			util.Logger.Info().Msg("pprof listening on :6060")
+			if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+				util.Logger.Error().Err(err).Msg("pprof server failed")
+			}
+		}()
+	}
 
 	// Wait for termination signal to gracefully shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
