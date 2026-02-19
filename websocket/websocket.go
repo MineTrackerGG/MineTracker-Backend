@@ -24,7 +24,7 @@ type Hub struct {
 	clients       map[*websocket.Conn]bool
 	writeMu       map[*websocket.Conn]*sync.Mutex
 	subscriptions map[string]map[*websocket.Conn]bool
-	subNotify     map[string]chan bool // Notify channels for subscription changes
+	subNotify     map[string]chan bool
 	mu            sync.RWMutex
 }
 
@@ -49,12 +49,10 @@ func (h *Hub) Unregister(conn *websocket.Conn) {
 	delete(h.clients, conn)
 	delete(h.writeMu, conn)
 
-	// Check each subscription and notify if this was the last subscriber
 	for ip, subs := range h.subscriptions {
 		if subs[conn] {
 			delete(subs, conn)
 
-			// Notify if this was last subscriber
 			if len(subs) == 0 {
 				delete(h.subscriptions, ip)
 				if h.subNotify[ip] != nil {
@@ -79,7 +77,6 @@ func (h *Hub) Subscribe(conn *websocket.Conn, ip string) {
 	wasEmpty := len(h.subscriptions[ip]) == 0
 	h.subscriptions[ip][conn] = true
 
-	// Notify server goroutine if this is first subscriber
 	if wasEmpty && h.subNotify[ip] != nil {
 		select {
 		case h.subNotify[ip] <- true:
@@ -95,7 +92,6 @@ func (h *Hub) Unsubscribe(conn *websocket.Conn, ip string) {
 	if subs, ok := h.subscriptions[ip]; ok {
 		delete(subs, conn)
 
-		// Notify server goroutine if this was last subscriber
 		if len(subs) == 0 {
 			delete(h.subscriptions, ip)
 			if h.subNotify[ip] != nil {

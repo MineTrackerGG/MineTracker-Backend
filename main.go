@@ -32,7 +32,6 @@ func main() {
 
 	ctx, serverJobCancel := context.WithCancel(context.Background())
 
-	// check if connected to mongodb
 	util.Logger.Info().Msg("Connected to MongoDB!")
 
 	err := database.ConnectInflux()
@@ -61,10 +60,11 @@ func main() {
 		return
 	}
 
-	data.Servers = servers // Update the global Servers variable with data from MongoDB
+	data.Servers = servers
+
 	cursor.Close(context.Background())
 
-	pingJob := task.NewServerJob(0, Servers) // interval unused now
+	pingJob := task.NewServerJob(0, Servers)
 
 	task.StartInfluxWriter(ctx)
 	task.StartDBWriter(ctx)
@@ -125,7 +125,6 @@ func main() {
 		}()
 	}
 
-	// Wait for termination signal to gracefully shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

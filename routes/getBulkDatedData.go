@@ -24,7 +24,6 @@ func RegisterGetBulkDatedDataRoute(r *gin.Engine) {
 
 		servers := strings.Split(serversParam, ",")
 
-		// Remove empty servers
 		var validServers []string
 		for _, s := range servers {
 			s = strings.TrimSpace(s)
@@ -38,7 +37,6 @@ func RegisterGetBulkDatedDataRoute(r *gin.Engine) {
 			return
 		}
 
-		// Parallel processing with goroutines
 		resultChan := make(chan serverResult, len(validServers))
 		var wg sync.WaitGroup
 
@@ -58,13 +56,11 @@ func RegisterGetBulkDatedDataRoute(r *gin.Engine) {
 			}(server)
 		}
 
-		// Close channel when all goroutines are done
 		go func() {
 			wg.Wait()
 			close(resultChan)
 		}()
 
-		// Collect results
 		result := make(map[string]interface{})
 		var commonStep string
 

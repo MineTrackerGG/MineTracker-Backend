@@ -69,7 +69,6 @@ func NewServerJob(interval time.Duration, servers []data.PingableServer) *PingJo
 func (j *PingJob) StartServerJob(ctx context.Context) {
 	var wg sync.WaitGroup
 
-	// Start individual goroutine for each server
 	for _, server := range j.servers {
 		wg.Add(1)
 		go func(srv data.PingableServer) {
@@ -84,33 +83,28 @@ func (j *PingJob) StartServerJob(ctx context.Context) {
 }
 
 func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer) {
-	// Register for subscription change notifications
 	notifyChan := websocket.GlobalHub.RegisterServerNotify(server.IP)
 	defer websocket.GlobalHub.UnregisterServerNotify(server.IP)
 
-	// Custom interval from config (optional)
 	var customInterval time.Duration
 	if server.Interval > 0 {
 		customInterval = time.Duration(server.Interval) * time.Second
 	}
 
-	// Adaptive ticker - starts at 10 seconds, adjusts based on subscriptions
 	getCurrentInterval := func() time.Duration {
 		if customInterval > 0 {
 			return customInterval
 		}
 
-		// Check if anyone is subscribed to this server
 		if websocket.GlobalHub.IsSubscribed(server.IP) {
-			return 1 * time.Second // Fast updates for subscribed servers
+			return 1 * time.Second
 		}
-		return 10 * time.Second // Slow updates for unsubscribed servers
+		return 10 * time.Second
 	}
 
 	ticker := time.NewTicker(getCurrentInterval())
 	defer ticker.Stop()
 
-	// Ping immediately on start
 	j.pingServer(server)
 
 	lastInterval := getCurrentInterval()
@@ -120,7 +114,6 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 		case <-ticker.C:
 			j.pingServer(server)
 
-			// Check if interval needs adjustment after ping
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
 				ticker.Reset(newInterval)
@@ -129,16 +122,13 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 
 		case _, ok := <-notifyChan:
 			if !ok {
-				// Channel closed, exit
 				return
 			}
-			// Subscription status changed - immediately adjust interval
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
 				ticker.Reset(newInterval)
 				lastInterval = newInterval
 
-				// Ping immediately on subscription to give instant data
 				if newInterval < lastInterval {
 					j.pingServer(server)
 				}
@@ -192,7 +182,6 @@ func StartInfluxWriter(ctx context.Context) {
 				writeApi.WritePoint(point)
 
 			case <-ctx.Done():
-				// Drain remaining points before exiting
 				for {
 					select {
 					case point, ok := <-influxQueue:
@@ -252,7 +241,6 @@ func StartDBWriter(ctx context.Context) {
 				flush()
 
 			case <-ctx.Done():
-				// Drain remaining operations before exiting
 				flush()
 				for {
 					select {
@@ -288,7 +276,6 @@ func (j *PingJob) pingServer(server data.PingableServer) {
 		2*time.Second,
 	)
 	if err != nil {
-		// Server offline, still update cache
 		if cached, ok := serverCache.Load(server.IP); ok {
 			existing := cached.(data.Server)
 			existing.Online = false
@@ -304,7 +291,6 @@ func (j *PingJob) pingServer(server data.PingableServer) {
 
 	pc := resp.PlayerCount.Online
 
-	// INSTANT WebSocket update - happens immediately when ping completes
 	websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
 		"type": "data_point_rt",
 		"data": data.ServerDataPoint{
@@ -315,7 +301,6 @@ func (j *PingJob) pingServer(server data.PingableServer) {
 		},
 	})
 
-	// Get cached server data or create new
 	var existing data.Server
 	if cached, ok := serverCache.Load(server.IP); ok {
 		existing = cached.(data.Server)
@@ -336,17 +321,13 @@ func (j *PingJob) pingServer(server data.PingableServer) {
 		existing.Icon = resp.Favicon
 	}
 
-	// Update cache
 	serverCache.Store(server.IP, existing)
 
-	// Queue async DB write (non-blocking)
 	select {
 	case dbWriteQueue <- dbWriteOp{server: existing}:
 	default:
-		// Queue full, skip this write
 	}
 
-	// Queue InfluxDB write (non-blocking)
 	point := write.NewPoint(
 		"server_data",
 		map[string]string{

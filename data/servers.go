@@ -12,7 +12,7 @@ type PingableServer struct {
 	Name     string `json:"name"`
 	IP       string `json:"ip"`
 	Type     string `json:"type"`
-	Interval int    `json:"interval,omitempty"` // Ping interval in seconds, defaults to 5
+	Interval int    `json:"interval,omitempty"`
 }
 
 type Server struct {

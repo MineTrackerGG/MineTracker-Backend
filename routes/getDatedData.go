@@ -19,7 +19,7 @@ type cacheEntry struct {
 var (
 	cache      = make(map[string]cacheEntry)
 	cacheMutex sync.RWMutex
-	cacheTTL   = 30 * time.Second // Cache für 30 Sekunden
+	cacheTTL   = 30 * time.Second
 )
 
 func RegisterGetDatedDataRoute(r *gin.Engine) {
@@ -29,7 +29,6 @@ func RegisterGetDatedDataRoute(r *gin.Engine) {
 
 		cacheKey := fmt.Sprintf("%s:%s", server, timeParam)
 
-		// Check cache first
 		cacheMutex.RLock()
 		if entry, found := cache[cacheKey]; found && time.Since(entry.timestamp) < cacheTTL {
 			cacheMutex.RUnlock()
@@ -41,7 +40,6 @@ func RegisterGetDatedDataRoute(r *gin.Engine) {
 		}
 		cacheMutex.RUnlock()
 
-		// Query data
 		dataPoints, step, err := data.QueryDataPoints(server, fmt.Sprintf("-%s", timeParam))
 
 		if err != nil {
@@ -49,7 +47,6 @@ func RegisterGetDatedDataRoute(r *gin.Engine) {
 			return
 		}
 
-		// return empty result if no data found
 		if dataPoints == nil {
 			c.JSON(http.StatusOK, gin.H{
 				"data": []interface{}{},
@@ -58,7 +55,6 @@ func RegisterGetDatedDataRoute(r *gin.Engine) {
 			return
 		}
 
-		// Store in cache
 		cacheMutex.Lock()
 		cache[cacheKey] = cacheEntry{
 			data:      dataPoints,
