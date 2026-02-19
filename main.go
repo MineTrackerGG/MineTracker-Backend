@@ -118,8 +118,8 @@ func main() {
 
 	if os.Getenv("PROFILING_ENABLED") == "true" {
 		go func() {
-			util.Logger.Info().Msg("pprof listening on :6060")
-			if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			util.Logger.Info().Msg("pprof listening on :" + os.Getenv("PROFILING_PORT"))
+			if err := http.ListenAndServe(os.Getenv("PROFILING_HOST")+":"+os.Getenv("PROFILING_PORT"), nil); err != nil {
 				util.Logger.Error().Err(err).Msg("pprof server failed")
 			}
 		}()
