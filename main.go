@@ -85,6 +85,7 @@ func main() {
 		routes.RegisterGetDatedDataRoute(r)
 		routes.RegisterGetBulkDatedDataRoute(r)
 		routes.RegisterGetServers(r)
+		routes.RegisterGetVersionRoute(r)
 
 		r.GET("/ws", func(c *gin.Context) {
 			websocket.HandleWebSocket(c.Writer, c.Request)

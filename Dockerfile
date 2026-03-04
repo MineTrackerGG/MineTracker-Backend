@@ -9,9 +9,11 @@ RUN go mod download
 
 COPY . .
 
+ARG GIT_COMMIT=unknown
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app MineTracker
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X MineTracker/util.GitCommit=${GIT_COMMIT}" -o app MineTracker
 
 FROM alpine:latest
 
