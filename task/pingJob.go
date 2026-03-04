@@ -13,33 +13,19 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
-	mctypes "github.com/iverly/go-mcping/api/types"
-	"github.com/iverly/go-mcping/mcping"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
-
-type PingResult struct {
-	success     bool
-	playerCount int
-}
-
-// serverPinger abstracts mcping's unexported pinger type so it can be reused
-// across calls without being re-created (and re-allocating its DNS resolver)
-// on every tick.
-type serverPinger interface {
-	PingWithTimeout(host string, port uint16, timeout time.Duration) (*mctypes.PingResponse, error)
-}
 
 const (
 	influxQueueSize  = 500
 	bulkFlushSize    = 300
 	dbWriteQueueSize = 1000
 
-	// maxConcurrentPings caps simultaneous active PingWithTimeout calls.
-	// Each call allocates ~4KB (bufio.Reader) + JSON decoder + maps, so
-	// letting all 63 goroutines pile up at once causes severe GC pressure.
+	// maxConcurrentPings caps simultaneous active ping calls.
+	// Each call allocates a TCP connection + bufio buffer; keeping a hard cap
+	// prevents a latency spike on slow servers from stacking up goroutines.
 	maxConcurrentPings = 20
 )
 
@@ -133,7 +119,7 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 	notifyChan := websocket.GlobalHub.RegisterServerNotify(server.IP)
 	defer websocket.GlobalHub.UnregisterServerNotify(server.IP)
 
-	pinger := mcping.NewPinger()
+	pinger := newPooledPinger()
 
 	var customInterval time.Duration
 	if server.Interval > 0 {
@@ -323,7 +309,7 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 	// Acquire concurrency slot before opening a TCP connection.
 	// This prevents all 63 goroutines from hammering the allocator simultaneously.
 	pingLimit <- struct{}{}
-	resp, err := pinger.PingWithTimeout(
+	resp, err := pinger.ping(
 		host,
 		portOrDefault(port, 25565),
 		2*time.Second,
@@ -348,7 +334,7 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 		return
 	}
 
-	pc := resp.PlayerCount.Online
+	pc := resp.PlayerCount
 
 	websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
 		"type": "data_point_rt",
