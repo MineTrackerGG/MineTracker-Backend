@@ -36,6 +36,11 @@ const (
 	influxQueueSize  = 500
 	bulkFlushSize    = 300
 	dbWriteQueueSize = 1000
+
+	// maxConcurrentPings caps simultaneous active PingWithTimeout calls.
+	// Each call allocates ~4KB (bufio.Reader) + JSON decoder + maps, so
+	// letting all 63 goroutines pile up at once causes severe GC pressure.
+	maxConcurrentPings = 20
 )
 
 type dbWriteOp struct {
@@ -43,7 +48,25 @@ type dbWriteOp struct {
 }
 
 var dbWriteQueue = make(chan dbWriteOp, dbWriteQueueSize)
-var serverCache sync.Map
+
+// pingLimit is a counting semaphore that limits concurrent TCP ping calls.
+var pingLimit = make(chan struct{}, maxConcurrentPings)
+
+var (
+	serverCacheMu  sync.RWMutex
+	serverCacheMap = make(map[string]data.Server, 128)
+)
+
+// GetAllServers returns a snapshot of every server's live state.
+func GetAllServers() []data.Server {
+	serverCacheMu.RLock()
+	defer serverCacheMu.RUnlock()
+	result := make([]data.Server, 0, len(serverCacheMap))
+	for _, s := range serverCacheMap {
+		result = append(result, s)
+	}
+	return result
+}
 
 func parseAddress(addr string) (host string, port *uint16) {
 	parts := strings.Split(addr, ":")
@@ -77,12 +100,28 @@ func NewServerJob(interval time.Duration, servers []data.PingableServer) *PingJo
 func (j *PingJob) StartServerJob(ctx context.Context) {
 	var wg sync.WaitGroup
 
-	for _, server := range j.servers {
+	// Spread goroutine startup evenly across one full tick interval so that
+	// pings never all fire simultaneously. Without this, all 63 goroutines
+	// wake at t=0, 1, 2, ... causing a burst of allocations that triggers
+	// continuous GC (bufio.Reader, json.Decoder, maps per ping × 63).
+	var stagger time.Duration
+	if n := len(j.servers); n > 1 {
+		stagger = time.Second / time.Duration(n)
+	}
+
+	for i, server := range j.servers {
 		wg.Add(1)
-		go func(srv data.PingableServer) {
+		go func(srv data.PingableServer, idx int) {
 			defer wg.Done()
+			if idx > 0 {
+				select {
+				case <-time.After(time.Duration(idx) * stagger):
+				case <-ctx.Done():
+					return
+				}
+			}
 			j.runServerLoop(ctx, srv)
-		}(server)
+		}(server, i)
 	}
 
 	<-ctx.Done()
@@ -169,8 +208,10 @@ func LoadServerCache(ctx context.Context) error {
 		return err
 	}
 
+	serverCacheMu.Lock()
+	defer serverCacheMu.Unlock()
 	for _, server := range servers {
-		serverCache.Store(server.IP, server)
+		serverCacheMap[server.IP] = server
 	}
 
 	return nil
@@ -278,17 +319,27 @@ func StartDBWriter(ctx context.Context) {
 
 func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 	host, port := parseAddress(server.IP)
+
+	// Acquire concurrency slot before opening a TCP connection.
+	// This prevents all 63 goroutines from hammering the allocator simultaneously.
+	pingLimit <- struct{}{}
 	resp, err := pinger.PingWithTimeout(
 		host,
 		portOrDefault(port, 25565),
 		2*time.Second,
 	)
-	if err != nil {
-		if cached, ok := serverCache.Load(server.IP); ok {
-			existing := cached.(data.Server)
-			existing.Online = false
-			serverCache.Store(server.IP, existing)
+	<-pingLimit
 
+	if err != nil {
+		serverCacheMu.Lock()
+		existing, ok := serverCacheMap[server.IP]
+		if ok {
+			existing.Online = false
+			serverCacheMap[server.IP] = existing
+		}
+		serverCacheMu.Unlock()
+
+		if ok {
 			select {
 			case dbWriteQueue <- dbWriteOp{server: existing}:
 			default:
@@ -309,10 +360,9 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 		},
 	})
 
-	var existing data.Server
-	if cached, ok := serverCache.Load(server.IP); ok {
-		existing = cached.(data.Server)
-	}
+	serverCacheMu.RLock()
+	existing := serverCacheMap[server.IP]
+	serverCacheMu.RUnlock()
 
 	existing.Name = server.Name
 	existing.IP = server.IP
@@ -329,7 +379,9 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 		existing.Icon = resp.Favicon
 	}
 
-	serverCache.Store(server.IP, existing)
+	serverCacheMu.Lock()
+	serverCacheMap[server.IP] = existing
+	serverCacheMu.Unlock()
 
 	select {
 	case dbWriteQueue <- dbWriteOp{server: existing}:

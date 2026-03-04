@@ -12,7 +12,6 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -20,12 +19,9 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func main() {
-	runtime.GOMAXPROCS(6)
-
 	_ = godotenv.Load()
 
 	database.ConnectMongo(os.Getenv("MONGO_URI"))
@@ -47,22 +43,6 @@ func main() {
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to load servers.json")
 	}
-
-	collection := database.MongoClient.Database("minetracker").Collection("servers")
-	cursor, err := collection.Find(context.Background(), bson.M{})
-	if err != nil {
-		util.Logger.Fatal().Err(err).Msg("Failed to retrieve servers from MongoDB")
-		return
-	}
-	var servers []data.Server
-	if err := cursor.All(context.Background(), &servers); err != nil {
-		util.Logger.Fatal().Err(err).Msg("Failed to parse servers from MongoDB")
-		return
-	}
-
-	data.Servers = servers
-
-	cursor.Close(context.Background())
 
 	pingJob := task.NewServerJob(0, Servers)
 
