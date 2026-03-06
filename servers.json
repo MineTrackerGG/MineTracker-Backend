@@ -20,6 +20,11 @@
     "type": "PC"
   },
   {
+    "name": "MCPvP.club",
+    "ip": "mcpvp.club",
+    "type": "PC"
+  },
+  {
     "name": "FlowMC.de",
     "ip": "flowmc.de",
     "type": "PC"
@@ -27,6 +32,11 @@
   {
     "name": "NoviaMC.de",
     "ip": "noviamc.de",
+    "type": "PC"
+  },
+  {
+    "name": "EraMC.net",
+    "ip": "eramc.net",
     "type": "PC"
   },
   {
@@ -190,8 +200,8 @@
     "type": "PC"
   },
   {
-    "name": "Skydinse.net",
-    "ip": "skydinse.net",
+    "name": "Skydinse.de",
+    "ip": "skydinse.de",
     "type": "PC"
   },
   {

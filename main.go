@@ -48,6 +48,7 @@ func main() {
 
 	task.StartInfluxWriter(ctx)
 	task.StartDBWriter(ctx)
+	task.StartActiveStatusSync(ctx)
 
 	go pingJob.StartServerJob(ctx)
 

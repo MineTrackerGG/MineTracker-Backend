@@ -23,6 +23,7 @@ type Server struct {
 	Online      bool   `json:"online"`
 	PlayerCount int    `json:"player_count"`
 	Peak        int    `json:"peak"`
+	Active      bool   `json:"active"`
 }
 
 type ExtendedServer struct {

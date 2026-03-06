@@ -43,15 +43,29 @@ var (
 	serverCacheMap = make(map[string]data.Server, 128)
 )
 
-// GetAllServers returns a snapshot of every server's live state.
+// GetAllServers returns a snapshot of every active server's live state.
 func GetAllServers() []data.Server {
 	serverCacheMu.RLock()
 	defer serverCacheMu.RUnlock()
 	result := make([]data.Server, 0, len(serverCacheMap))
 	for _, s := range serverCacheMap {
-		result = append(result, s)
+		if s.Active {
+			result = append(result, s)
+		}
 	}
 	return result
+}
+
+// isServerActive reports whether a server is marked active in the cache.
+// Servers not yet cached (first encounter) are treated as active by default.
+func isServerActive(ip string) bool {
+	serverCacheMu.RLock()
+	defer serverCacheMu.RUnlock()
+	s, ok := serverCacheMap[ip]
+	if !ok {
+		return true
+	}
+	return s.Active
 }
 
 func parseAddress(addr string) (host string, port *uint16) {
@@ -140,14 +154,18 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 	ticker := time.NewTicker(getCurrentInterval())
 	defer ticker.Stop()
 
-	j.pingServer(server, pinger)
+	if isServerActive(server.IP) {
+		j.pingServer(server, pinger)
+	}
 
 	lastInterval := getCurrentInterval()
 
 	for {
 		select {
 		case <-ticker.C:
-			j.pingServer(server, pinger)
+			if isServerActive(server.IP) {
+				j.pingServer(server, pinger)
+			}
 
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
@@ -164,7 +182,7 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 				ticker.Reset(newInterval)
 				lastInterval = newInterval
 
-				if newInterval < lastInterval {
+				if newInterval < lastInterval && isServerActive(server.IP) {
 					j.pingServer(server, pinger)
 				}
 			}
@@ -182,6 +200,13 @@ func LoadServerCache(ctx context.Context) error {
 	collection := database.MongoClient.
 		Database("minetracker").
 		Collection("servers")
+
+	// One-time migration: ensure all existing documents have the active field.
+	_, _ = collection.UpdateMany(
+		ctx,
+		bson.M{"active": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"active": true}},
+	)
 
 	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
@@ -201,6 +226,60 @@ func LoadServerCache(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// StartActiveStatusSync periodically refreshes the active flag for each server
+// from MongoDB so that admin changes take effect without a backend restart.
+func StartActiveStatusSync(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				refreshActiveStatus(ctx)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func refreshActiveStatus(ctx context.Context) {
+	collection := database.MongoClient.
+		Database("minetracker").
+		Collection("servers")
+
+	type activeEntry struct {
+		IP     string `bson:"ip"`
+		Active bool   `bson:"active"`
+	}
+
+	cursor, err := collection.Find(
+		ctx,
+		bson.M{},
+		options.Find().SetProjection(bson.M{"ip": 1, "active": 1}),
+	)
+	if err != nil {
+		util.Logger.Warn().Err(err).Msg("Failed to refresh active status from MongoDB")
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var entries []activeEntry
+	if err := cursor.All(ctx, &entries); err != nil {
+		util.Logger.Warn().Err(err).Msg("Failed to decode active status from MongoDB")
+		return
+	}
+
+	serverCacheMu.Lock()
+	defer serverCacheMu.Unlock()
+	for _, e := range entries {
+		if s, ok := serverCacheMap[e.IP]; ok {
+			s.Active = e.Active
+			serverCacheMap[e.IP] = s
+		}
+	}
 }
 
 func StartInfluxWriter(ctx context.Context) {
@@ -347,13 +426,16 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 	})
 
 	serverCacheMu.RLock()
-	existing := serverCacheMap[server.IP]
+	existing, found := serverCacheMap[server.IP]
 	serverCacheMu.RUnlock()
 
 	existing.Name = server.Name
 	existing.IP = server.IP
 	existing.Type = server.Type
 	existing.Online = true
+	if !found {
+		existing.Active = true
+	}
 
 	if pc > 0 {
 		existing.PlayerCount = pc
