@@ -49,7 +49,7 @@ func GetAllServers() []data.Server {
 	defer serverCacheMu.RUnlock()
 	result := make([]data.Server, 0, len(serverCacheMap))
 	for _, s := range serverCacheMap {
-		if s.Active {
+		if s.Active && s.Online {
 			result = append(result, s)
 		}
 	}
