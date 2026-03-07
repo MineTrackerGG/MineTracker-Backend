@@ -464,7 +464,7 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 			"name": server.Name,
 		},
 		map[string]interface{}{
-			"player_count": pc,
+			"player_count": existing.PlayerCount,
 		},
 		time.Now(),
 	)

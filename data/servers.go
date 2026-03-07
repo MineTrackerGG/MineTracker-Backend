@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -88,7 +89,7 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 
 		dataPoint := ServerDataPoint{
 			Timestamp:   record.Time().Unix(),
-			PlayerCount: int(record.Value().(float64)),
+			PlayerCount: int(math.Round(record.Value().(float64))),
 			Ip:          record.ValueByKey("ip").(string),
 			Name:        record.ValueByKey("name").(string),
 		}
