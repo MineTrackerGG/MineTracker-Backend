@@ -6,6 +6,8 @@ import (
 	"MineTracker/util"
 	"MineTracker/websocket"
 	"context"
+	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,11 +24,6 @@ const (
 	influxQueueSize  = 500
 	bulkFlushSize    = 300
 	dbWriteQueueSize = 1000
-
-	// maxConcurrentPings caps simultaneous active ping calls.
-	// Each call allocates a TCP connection + bufio buffer; keeping a hard cap
-	// prevents a latency spike on slow servers from stacking up goroutines.
-	maxConcurrentPings = 20
 )
 
 type dbWriteOp struct {
@@ -34,6 +31,8 @@ type dbWriteOp struct {
 }
 
 var dbWriteQueue = make(chan dbWriteOp, dbWriteQueueSize)
+
+var maxConcurrentPings = loadMaxConcurrentPings()
 
 // pingLimit is a counting semaphore that limits concurrent TCP ping calls.
 var pingLimit = make(chan struct{}, maxConcurrentPings)
@@ -69,6 +68,18 @@ func isServerActive(ip string) bool {
 }
 
 func parseAddress(addr string) (host string, port *uint16) {
+	if strings.Count(addr, ":") > 1 {
+		if h, p, err := net.SplitHostPort(addr); err == nil {
+			host = strings.Trim(h, "[]")
+			parsed, convErr := strconv.ParseUint(p, 10, 16)
+			if convErr == nil {
+				pp := uint16(parsed)
+				return host, &pp
+			}
+		}
+		return addr, nil
+	}
+
 	parts := strings.Split(addr, ":")
 	host = parts[0]
 
@@ -81,6 +92,30 @@ func parseAddress(addr string) (host string, port *uint16) {
 	}
 
 	return
+}
+
+func loadMaxConcurrentPings() int {
+	const defaultMax = 96
+	const minMax = 1
+	const maxMax = 1000
+
+	raw := strings.TrimSpace(os.Getenv("PING_MAX_CONCURRENT"))
+	if raw == "" {
+		return defaultMax
+	}
+
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		util.Logger.Warn().Str("PING_MAX_CONCURRENT", raw).Msg("Invalid PING_MAX_CONCURRENT, using default")
+		return defaultMax
+	}
+	if v < minMax {
+		return minMax
+	}
+	if v > maxMax {
+		return maxMax
+	}
+	return v
 }
 
 func portOrDefault(port *uint16, def uint16) uint16 {
@@ -177,12 +212,13 @@ func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer)
 			if !ok {
 				return
 			}
+			prevInterval := lastInterval
 			newInterval := getCurrentInterval()
 			if newInterval != lastInterval {
 				ticker.Reset(newInterval)
 				lastInterval = newInterval
 
-				if newInterval < lastInterval && isServerActive(server.IP) {
+				if newInterval < prevInterval && isServerActive(server.IP) {
 					j.pingServer(server, pinger)
 				}
 			}
@@ -398,17 +434,22 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 	if err != nil {
 		serverCacheMu.Lock()
 		existing, ok := serverCacheMap[server.IP]
-		if ok {
-			existing.Online = false
-			serverCacheMap[server.IP] = existing
+		if !ok {
+			existing = data.Server{
+				Name:   server.Name,
+				IP:     server.IP,
+				Type:   server.Type,
+				Active: true,
+			}
 		}
+		existing.Online = false
+		existing.PlayerCount = 0
+		serverCacheMap[server.IP] = existing
 		serverCacheMu.Unlock()
 
-		if ok {
-			select {
-			case dbWriteQueue <- dbWriteOp{server: existing}:
-			default:
-			}
+		select {
+		case dbWriteQueue <- dbWriteOp{server: existing}:
+		default:
 		}
 		return
 	}
@@ -437,9 +478,7 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 		existing.Active = true
 	}
 
-	if pc > 0 {
-		existing.PlayerCount = pc
-	}
+	existing.PlayerCount = pc
 	if pc > existing.Peak {
 		existing.Peak = pc
 	}

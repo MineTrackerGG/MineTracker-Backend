@@ -63,7 +63,7 @@ func main() {
 		return
 	}
 
-	util.Logger.Info().Msg("Loaded " + strconv.Itoa(int(rune(len(Servers)))) + " servers from servers.json")
+	util.Logger.Info().Msg("Loaded " + strconv.Itoa(len(Servers)) + " servers from servers.json")
 
 	go func() {
 		if os.Getenv("DEPLOYMENT_MODE") == "production" || os.Getenv("DEPLOYMENT_MODE") == "release" {

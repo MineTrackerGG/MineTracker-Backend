@@ -30,6 +30,16 @@ type serverPinger interface {
 // pressure in the previous go-mcping-based implementation.
 type pooledPinger struct {
 	pool sync.Pool
+
+	lookupTTL         time.Duration
+	lookupNegativeTTL time.Duration
+	srvCache          sync.Map
+}
+
+type resolvedTarget struct {
+	host      string
+	port      uint16
+	expiresAt time.Time
 }
 
 func newPooledPinger() *pooledPinger {
@@ -39,16 +49,13 @@ func newPooledPinger() *pooledPinger {
 				return bufio.NewReaderSize(nil, 4096)
 			},
 		},
+		lookupTTL:         5 * time.Minute,
+		lookupNegativeTTL: 1 * time.Minute,
 	}
 }
 
 func (p *pooledPinger) ping(host string, port uint16, timeout time.Duration) (*mcPingResult, error) {
-	// SRV resolution: _minecraft._tcp.<host>
-	// Matches go-mcping behaviour; fails quickly (NXDOMAIN) for plain IPs.
-	if _, srvs, err := net.LookupSRV("minecraft", "tcp", host); err == nil && len(srvs) > 0 {
-		host = strings.TrimSuffix(srvs[0].Target, ".")
-		port = srvs[0].Port
-	}
+	host, port = p.resolveTarget(host, port)
 
 	conn, err := net.DialTimeout("tcp", host+":"+strconv.FormatUint(uint64(port), 10), timeout)
 	if err != nil {
@@ -68,6 +75,36 @@ func (p *pooledPinger) ping(host string, port uint16, timeout time.Duration) (*m
 	result, err := slpReadResponse(br)
 	p.pool.Put(br)
 	return result, err
+}
+
+func (p *pooledPinger) resolveTarget(host string, port uint16) (string, uint16) {
+	if net.ParseIP(host) != nil {
+		return host, port
+	}
+
+	if cached, ok := p.srvCache.Load(host); ok {
+		if entry, okCast := cached.(resolvedTarget); okCast {
+			if time.Now().Before(entry.expiresAt) {
+				return entry.host, entry.port
+			}
+			p.srvCache.Delete(host)
+		}
+	}
+
+	entry := resolvedTarget{
+		host:      host,
+		port:      port,
+		expiresAt: time.Now().Add(p.lookupNegativeTTL),
+	}
+
+	if _, srvs, err := net.LookupSRV("minecraft", "tcp", host); err == nil && len(srvs) > 0 {
+		entry.host = strings.TrimSuffix(srvs[0].Target, ".")
+		entry.port = srvs[0].Port
+		entry.expiresAt = time.Now().Add(p.lookupTTL)
+	}
+
+	p.srvCache.Store(host, entry)
+	return entry.host, entry.port
 }
 
 // slpSendHandshake writes the SLP handshake + status-request packets in a
