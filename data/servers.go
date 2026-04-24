@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"sort"
 )
@@ -88,9 +87,14 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 			continue
 		}
 
+		playerCount, ok := recordValueToInt(record.Value())
+		if !ok {
+			continue
+		}
+
 		dataPoint := ServerDataPoint{
 			Timestamp:   record.Time().Unix(),
-			PlayerCount: int(math.Round(record.Value().(float64))),
+			PlayerCount: playerCount,
 			Ip:          record.ValueByKey("ip").(string),
 			Name:        record.ValueByKey("name").(string),
 		}
@@ -149,9 +153,14 @@ func queryExtremeDataPoints(ip string, duration string) ([]ServerDataPoint, erro
 			continue
 		}
 
+		playerCount, ok := recordValueToInt(record.Value())
+		if !ok {
+			continue
+		}
+
 		dataPoint := ServerDataPoint{
 			Timestamp:   record.Time().Unix(),
-			PlayerCount: int(math.Round(record.Value().(float64))),
+			PlayerCount: playerCount,
 			Ip:          record.ValueByKey("ip").(string),
 			Name:        record.ValueByKey("name").(string),
 		}
@@ -171,9 +180,14 @@ func queryExtremeDataPoints(ip string, duration string) ([]ServerDataPoint, erro
 			continue
 		}
 
+		playerCount, ok := recordValueToInt(record.Value())
+		if !ok {
+			continue
+		}
+
 		dataPoint := ServerDataPoint{
 			Timestamp:   record.Time().Unix(),
-			PlayerCount: int(math.Round(record.Value().(float64))),
+			PlayerCount: playerCount,
 			Ip:          record.ValueByKey("ip").(string),
 			Name:        record.ValueByKey("name").(string),
 		}
@@ -224,4 +238,35 @@ func mergeServerDataPoints(base []ServerDataPoint, extras []ServerDataPoint) []S
 	})
 
 	return merged
+}
+
+func recordValueToInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case uint:
+		return int(v), true
+	case uint8:
+		return int(v), true
+	case uint16:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case uint64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
