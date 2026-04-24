@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 )
 
 type PingableServer struct {
@@ -105,5 +106,122 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 
 	_ = result.Close()
 
-	return dataPoints, step, nil
+	extremes, err := queryExtremeDataPoints(ip, duration)
+	if err != nil {
+		return nil, "0m", err
+	}
+
+	return mergeServerDataPoints(dataPoints, extremes), step, nil
+}
+
+func queryExtremeDataPoints(ip string, duration string) ([]ServerDataPoint, error) {
+	queryApi := database.InfluxClient.QueryAPI(os.Getenv("INFLUXDB_ORG"))
+
+	baseQuery := fmt.Sprintf(`from(bucket: "minetracker_data")
+  |> range(start:  %s)
+  |> filter(fn: (r) => r["_measurement"] == "server_data")
+  |> filter(fn: (r) => r["_field"] == "player_count")`, duration)
+
+	if ip != "" {
+		baseQuery += fmt.Sprintf(`
+  |> filter(fn:  (r) => r["ip"] == "%s")`, ip)
+	}
+
+	maxResult, err := queryApi.Query(context.Background(), baseQuery+`
+  |> top(n: 1, columns: ["_value"])`)
+	if err != nil {
+		return nil, fmt.Errorf("query execution failed for max point: %w", err)
+	}
+	defer func() { _ = maxResult.Close() }()
+
+	minResult, err := queryApi.Query(context.Background(), baseQuery+`
+  |> bottom(n: 1, columns: ["_value"])`)
+	if err != nil {
+		return nil, fmt.Errorf("query execution failed for min point: %w", err)
+	}
+	defer func() { _ = minResult.Close() }()
+
+	var dataPoints []ServerDataPoint
+
+	for maxResult.Next() {
+		record := maxResult.Record()
+		if record == nil {
+			continue
+		}
+
+		dataPoint := ServerDataPoint{
+			Timestamp:   record.Time().Unix(),
+			PlayerCount: int(math.Round(record.Value().(float64))),
+			Ip:          record.ValueByKey("ip").(string),
+			Name:        record.ValueByKey("name").(string),
+		}
+
+		if ip == "" || dataPoint.Ip == ip {
+			dataPoints = append(dataPoints, dataPoint)
+		}
+	}
+
+	if maxResult.Err() != nil {
+		return nil, fmt.Errorf("result error: %w", maxResult.Err())
+	}
+
+	for minResult.Next() {
+		record := minResult.Record()
+		if record == nil {
+			continue
+		}
+
+		dataPoint := ServerDataPoint{
+			Timestamp:   record.Time().Unix(),
+			PlayerCount: int(math.Round(record.Value().(float64))),
+			Ip:          record.ValueByKey("ip").(string),
+			Name:        record.ValueByKey("name").(string),
+		}
+
+		if ip == "" || dataPoint.Ip == ip {
+			dataPoints = append(dataPoints, dataPoint)
+		}
+	}
+
+	if minResult.Err() != nil {
+		return nil, fmt.Errorf("result error: %w", minResult.Err())
+	}
+
+	return dataPoints, nil
+}
+
+func mergeServerDataPoints(base []ServerDataPoint, extras []ServerDataPoint) []ServerDataPoint {
+	merged := make([]ServerDataPoint, 0, len(base)+len(extras))
+	seen := make(map[string]struct{}, len(base)+len(extras))
+
+	addPoint := func(point ServerDataPoint) {
+		key := fmt.Sprintf("%d|%d|%s|%s", point.Timestamp, point.PlayerCount, point.Ip, point.Name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, point)
+	}
+
+	for _, point := range base {
+		addPoint(point)
+	}
+	for _, point := range extras {
+		addPoint(point)
+	}
+
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Timestamp != merged[j].Timestamp {
+			return merged[i].Timestamp < merged[j].Timestamp
+		}
+		if merged[i].PlayerCount != merged[j].PlayerCount {
+			return merged[i].PlayerCount < merged[j].PlayerCount
+		}
+		if merged[i].Ip != merged[j].Ip {
+			return merged[i].Ip < merged[j].Ip
+		}
+		return merged[i].Name < merged[j].Name
+	})
+
+	return merged
 }
