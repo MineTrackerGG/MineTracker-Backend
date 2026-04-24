@@ -405,3 +405,28 @@ func BuildInfluxQueryFromParams(params QueryParams) (string, int, string, error)
 
 	return query, dataPoints, step, nil
 }
+
+// QueryPointBudget returns the query point budget for a given time range.
+// Longer ranges use a smaller budget so the graph stays readable instead of
+// over-representing the most recent, dense portion of the series.
+func QueryPointBudget(start string) (maxDataPoints, minDataPoints int) {
+	rangeInMinutes, err := timeToMinutes(start)
+	if err != nil {
+		return 500, 10
+	}
+
+	rangeInMinutes = math.Abs(rangeInMinutes)
+
+	switch {
+	case rangeInMinutes >= 525600:
+		return 120, 10
+	case rangeInMinutes >= 43200:
+		return 240, 10
+	case rangeInMinutes >= 10080:
+		return 180, 10
+	case rangeInMinutes >= 1440:
+		return 240, 10
+	default:
+		return 500, 10
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 )
@@ -60,12 +61,17 @@ func LoadServers(path string) ([]PingableServer, error) {
 
 func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, error) {
 	queryApi := database.InfluxClient.QueryAPI(os.Getenv("INFLUXDB_ORG"))
+	renderMaxDataPoints, minDataPoints := QueryPointBudget(duration)
+	queryMaxDataPoints := renderMaxDataPoints
+	if durationLongerThanADay(duration) {
+		queryMaxDataPoints = renderMaxDataPoints * 4
+	}
 
 	query, _, step, err := BuildInfluxQueryFromParams(QueryParams{
 		Start:         duration,
 		ServerFilter:  ip,
-		MaxDataPoints: 500,
-		MinDataPoints: 10,
+		MaxDataPoints: queryMaxDataPoints,
+		MinDataPoints: minDataPoints,
 		UseAdaptive:   false,
 	})
 
@@ -115,7 +121,19 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 		return nil, "0m", err
 	}
 
-	return mergeServerDataPoints(dataPoints, extremes), step, nil
+	points := mergeServerDataPoints(dataPoints, extremes)
+	points = downsampleServerDataPoints(points, renderMaxDataPoints)
+
+	return points, step, nil
+}
+
+func durationLongerThanADay(duration string) bool {
+	rangeInMinutes, err := timeToMinutes(duration)
+	if err != nil {
+		return false
+	}
+
+	return math.Abs(rangeInMinutes) >= 1440
 }
 
 func queryExtremeDataPoints(ip string, duration string) ([]ServerDataPoint, error) {
@@ -238,6 +256,99 @@ func mergeServerDataPoints(base []ServerDataPoint, extras []ServerDataPoint) []S
 	})
 
 	return merged
+}
+
+func downsampleServerDataPoints(points []ServerDataPoint, maxPoints int) []ServerDataPoint {
+	if maxPoints <= 0 || len(points) <= maxPoints {
+		return points
+	}
+
+	sort.Slice(points, func(i, j int) bool {
+		if points[i].Timestamp != points[j].Timestamp {
+			return points[i].Timestamp < points[j].Timestamp
+		}
+		if points[i].PlayerCount != points[j].PlayerCount {
+			return points[i].PlayerCount < points[j].PlayerCount
+		}
+		if points[i].Ip != points[j].Ip {
+			return points[i].Ip < points[j].Ip
+		}
+		return points[i].Name < points[j].Name
+	})
+
+	bucketCount := maxPoints / 4
+	if bucketCount < 1 {
+		bucketCount = 1
+	}
+
+	target := make([]ServerDataPoint, 0, maxPoints)
+	seen := make(map[string]struct{}, maxPoints)
+	bucketSize := float64(len(points)) / float64(bucketCount)
+
+	appendPoint := func(point ServerDataPoint) {
+		key := fmt.Sprintf("%d|%d|%s|%s", point.Timestamp, point.PlayerCount, point.Ip, point.Name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		target = append(target, point)
+	}
+
+	for bucket := 0; bucket < bucketCount; bucket++ {
+		start := int(math.Floor(float64(bucket) * bucketSize))
+		end := int(math.Floor(float64(bucket+1) * bucketSize))
+		if bucket == bucketCount-1 {
+			end = len(points)
+		}
+		if start < 0 {
+			start = 0
+		}
+		if end > len(points) {
+			end = len(points)
+		}
+		if start >= end {
+			continue
+		}
+
+		bucketPoints := points[start:end]
+		first := bucketPoints[0]
+		last := bucketPoints[len(bucketPoints)-1]
+		minPoint := first
+		maxPoint := first
+
+		for _, point := range bucketPoints[1:] {
+			if point.PlayerCount < minPoint.PlayerCount || (point.PlayerCount == minPoint.PlayerCount && point.Timestamp < minPoint.Timestamp) {
+				minPoint = point
+			}
+			if point.PlayerCount > maxPoint.PlayerCount || (point.PlayerCount == maxPoint.PlayerCount && point.Timestamp < maxPoint.Timestamp) {
+				maxPoint = point
+			}
+		}
+
+		bucketSelection := []ServerDataPoint{first, minPoint, maxPoint, last}
+		for _, point := range bucketSelection {
+			appendPoint(point)
+		}
+	}
+
+	sort.Slice(target, func(i, j int) bool {
+		if target[i].Timestamp != target[j].Timestamp {
+			return target[i].Timestamp < target[j].Timestamp
+		}
+		if target[i].PlayerCount != target[j].PlayerCount {
+			return target[i].PlayerCount < target[j].PlayerCount
+		}
+		if target[i].Ip != target[j].Ip {
+			return target[i].Ip < target[j].Ip
+		}
+		return target[i].Name < target[j].Name
+	})
+
+	if len(target) > maxPoints {
+		return target[:maxPoints]
+	}
+
+	return target
 }
 
 func recordValueToInt(value interface{}) (int, bool) {
