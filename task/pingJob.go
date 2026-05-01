@@ -456,15 +456,14 @@ func (j *PingJob) pingServer(server data.PingableServer, pinger serverPinger) {
 
 	pc := resp.PlayerCount
 
-	websocket.GlobalHub.SendToServer(server.IP, map[string]interface{}{
-		"type": "data_point_rt",
-		"data": data.ServerDataPoint{
-			Timestamp:   time.Now().Unix(),
-			PlayerCount: pc,
-			Ip:          server.IP,
-			Name:        server.Name,
-		},
-	})
+	dataPoint := data.ServerDataPoint{
+		Timestamp:   time.Now().Unix(),
+		PlayerCount: pc,
+		Ip:          server.IP,
+		Name:        server.Name,
+	}
+
+	websocket.GlobalHub.SendRawDataPoint(server.IP, dataPoint)
 
 	serverCacheMu.RLock()
 	existing, found := serverCacheMap[server.IP]

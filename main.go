@@ -8,6 +8,7 @@ import (
 	"MineTracker/util"
 	"MineTracker/websocket"
 	"context"
+	"expvar"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -87,6 +88,7 @@ func main() {
 		routes.RegisterGetBulkDatedDataRoute(r)
 		routes.RegisterGetServers(r)
 		routes.RegisterGetVersionRoute(r)
+		r.GET("/debug/vars", gin.WrapH(expvar.Handler()))
 
 		r.GET("/ws", func(c *gin.Context) {
 			websocket.HandleWebSocket(c.Writer, c.Request)

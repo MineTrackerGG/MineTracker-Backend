@@ -127,6 +127,67 @@ func QueryDataPoints(ip string, duration string) ([]ServerDataPoint, string, err
 	return points, step, nil
 }
 
+// QueryDataPointsWithStep returns the full aggregated series for a fixed step without additional downsampling.
+// This is used for websocket initial_data payloads where the frontend should receive the exact series
+// that matches the chosen chart range.
+func QueryDataPointsWithStep(ip string, duration string, step string) ([]ServerDataPoint, string, error) {
+	queryApi := database.InfluxClient.QueryAPI(os.Getenv("INFLUXDB_ORG"))
+
+	query, err := BuildInfluxQuery(duration, step, ip)
+	if err != nil {
+		return nil, step, fmt.Errorf("failed to build query: %w", err)
+	}
+
+	result, err := queryApi.Query(context.Background(), query)
+	if err != nil {
+		return nil, step, fmt.Errorf("query execution failed: %w", err)
+	}
+	defer func() { _ = result.Close() }()
+
+	var dataPoints []ServerDataPoint
+	for result.Next() {
+		record := result.Record()
+		if record == nil {
+			continue
+		}
+
+		playerCount, ok := recordValueToInt(record.Value())
+		if !ok {
+			continue
+		}
+
+		point := ServerDataPoint{
+			Timestamp:   record.Time().Unix(),
+			PlayerCount: playerCount,
+			Ip:          record.ValueByKey("ip").(string),
+			Name:        record.ValueByKey("name").(string),
+		}
+
+		if ip == "" || point.Ip == ip {
+			dataPoints = append(dataPoints, point)
+		}
+	}
+
+	if result.Err() != nil {
+		return nil, step, fmt.Errorf("result error: %w", result.Err())
+	}
+
+	sort.Slice(dataPoints, func(i, j int) bool {
+		if dataPoints[i].Timestamp != dataPoints[j].Timestamp {
+			return dataPoints[i].Timestamp < dataPoints[j].Timestamp
+		}
+		if dataPoints[i].PlayerCount != dataPoints[j].PlayerCount {
+			return dataPoints[i].PlayerCount < dataPoints[j].PlayerCount
+		}
+		if dataPoints[i].Ip != dataPoints[j].Ip {
+			return dataPoints[i].Ip < dataPoints[j].Ip
+		}
+		return dataPoints[i].Name < dataPoints[j].Name
+	})
+
+	return dataPoints, step, nil
+}
+
 func durationLongerThanADay(duration string) bool {
 	rangeInMinutes, err := timeToMinutes(duration)
 	if err != nil {

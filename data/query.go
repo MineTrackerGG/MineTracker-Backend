@@ -114,6 +114,35 @@ func CalculateOptimalStep(start string, maxDataPoints int) (string, error) {
 	return CalculateOptimalStepWithMin(start, maxDataPoints, 10)
 }
 
+// CalculateStepForTimeRange calculates the aggregation step for a time range without needing maxDataPoints
+// Used for quick step determination in real-time updates
+func CalculateStepForTimeRange(timeRange string) (string, error) {
+	rangeInMinutes, err := timeToMinutes(timeRange)
+	if err != nil {
+		return "", err
+	}
+	rangeInMinutes = math.Abs(rangeInMinutes)
+
+	// Use sensible defaults for different ranges
+	var stepMinutes float64
+	switch {
+	case rangeInMinutes <= 60: // <= 1 hour
+		stepMinutes = 10.0 / 60.0 // 10 seconds
+	case rangeInMinutes <= 360: // <= 6 hours
+		stepMinutes = 1.0 // 1 minute
+	case rangeInMinutes <= 1440: // <= 1 day
+		stepMinutes = 4.0 // 4 minutes
+	case rangeInMinutes <= 7200: // <= 5 days
+		stepMinutes = 20.0 // 20 minutes
+	case rangeInMinutes <= 10080: // <= 7 days
+		stepMinutes = 30.0 // 30 minutes
+	default:
+		stepMinutes = 60.0 // 1 hour
+	}
+
+	return minutesToTime(stepMinutes), nil
+}
+
 // CalculateOptimalStepWithMin calculates the optimal step for a given time range
 // Uses adaptive strategy to ensure meaningful data points even with sparse data
 func CalculateOptimalStepWithMin(start string, maxDataPoints, minDataPoints int) (string, error) {
