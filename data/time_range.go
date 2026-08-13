@@ -10,6 +10,10 @@ import (
 )
 
 var allowedTimeRanges = map[string]string{
+	"1m":  "1s",
+	"5m":  "1s",
+	"15m": "1s",
+	"30m": "1s",
 	"1h":  "10s",
 	"6h":  "1m",
 	"12h": "2m",
