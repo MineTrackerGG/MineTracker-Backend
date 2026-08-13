@@ -188,38 +188,81 @@ func (j *PingJob) UpdateServers(servers []data.PingableServer) {
 
 func (j *PingJob) StartServerJob(ctx context.Context) {
 	var wg sync.WaitGroup
-
-	j.mu.RLock()
-	servers := append([]data.PingableServer(nil), j.servers...)
-	j.mu.RUnlock()
-
-	// Spread goroutine startup evenly across one full tick interval so that
-	// pings never all fire simultaneously. Without this, all 63 goroutines
-	// wake at t=0, 1, 2, ... causing a burst of allocations that triggers
-	// continuous GC (bufio.Reader, json.Decoder, maps per ping × 63).
-	var stagger time.Duration
-	if n := len(servers); n > 1 {
-		stagger = time.Second / time.Duration(n)
+	type workerState struct {
+		server data.PingableServer
+		cancel context.CancelFunc
 	}
 
-	for i, server := range servers {
-		wg.Add(1)
-		go func(srv data.PingableServer, idx int) {
-			defer wg.Done()
-			if idx > 0 {
-				select {
-				case <-time.After(time.Duration(idx) * stagger):
-				case <-ctx.Done():
-					return
-				}
+	workers := make(map[string]workerState, 64)
+
+	reconcileWorkers := func() {
+		servers := j.snapshotServers()
+		desired := make(map[string]data.PingableServer, len(servers))
+		for _, server := range servers {
+			desired[server.IP] = server
+		}
+
+		for ip, worker := range workers {
+			next, ok := desired[ip]
+			if !ok || next != worker.server {
+				worker.cancel()
+				delete(workers, ip)
 			}
-			j.runServerLoop(ctx, srv)
-		}(server, i)
+		}
+
+		// Spread newly created worker startups evenly to avoid synchronized bursts.
+		var stagger time.Duration
+		if n := len(desired); n > 1 {
+			stagger = time.Second / time.Duration(n)
+		}
+		idx := 0
+
+		for ip, server := range desired {
+			if _, exists := workers[ip]; exists {
+				continue
+			}
+
+			workerCtx, workerCancel := context.WithCancel(ctx)
+			workers[ip] = workerState{
+				server: server,
+				cancel: workerCancel,
+			}
+
+			delay := time.Duration(idx) * stagger
+			idx++
+
+			wg.Add(1)
+			go func(srv data.PingableServer, startupDelay time.Duration, loopCtx context.Context) {
+				defer wg.Done()
+				if startupDelay > 0 {
+					select {
+					case <-time.After(startupDelay):
+					case <-loopCtx.Done():
+						return
+					}
+				}
+				j.runServerLoop(loopCtx, srv)
+			}(server, delay, workerCtx)
+		}
 	}
 
-	<-ctx.Done()
-	util.Logger.Info().Msg("Stopped data ping job.")
-	wg.Wait()
+	reconcileWorkers()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			reconcileWorkers()
+		case <-ctx.Done():
+			for _, worker := range workers {
+				worker.cancel()
+			}
+			util.Logger.Info().Msg("Stopped data ping job.")
+			wg.Wait()
+			return
+		}
+	}
 }
 
 func (j *PingJob) runServerLoop(ctx context.Context, server data.PingableServer) {

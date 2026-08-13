@@ -118,7 +118,11 @@ func main() {
 	defer stop()
 
 	<-ctx.Done()
-	database.MongoClient.Disconnect(ctx)
+	err = database.MongoClient.Disconnect(ctx)
+	if err != nil {
+		util.Logger.Error().Err(err).Msg("Failed to disconnect MongoDB client")
+		return
+	}
 	serverJobCancel()
 	util.Logger.Info().Msg("Shutting down MineTracker...")
 }

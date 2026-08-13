@@ -11,3 +11,9 @@ type PingJob struct {
 	servers  []data.PingableServer
 	mu       sync.RWMutex
 }
+
+func (j *PingJob) snapshotServers() []data.PingableServer {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return append([]data.PingableServer(nil), j.servers...)
+}
