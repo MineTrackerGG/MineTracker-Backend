@@ -228,3 +228,47 @@ func TestPingServerSuccessWritesZeroPlayerCount(t *testing.T) {
 		t.Fatal("expected influx point to be queued")
 	}
 }
+
+func TestApplyServerConfigHidesRemovedServersWithoutDeletingThem(t *testing.T) {
+	oldCache := serverCacheMap
+	oldConfig := configuredIPs
+	defer func() {
+		serverCacheMap = oldCache
+		configuredIPs = oldConfig
+	}()
+
+	serverCacheMap = map[string]data.Server{
+		"keep.example.org": {
+			Name:   "Keep",
+			IP:     "keep.example.org",
+			Type:   "PC",
+			Online: true,
+			Active: true,
+		},
+		"remove.example.org": {
+			Name:   "Remove",
+			IP:     "remove.example.org",
+			Type:   "PC",
+			Online: true,
+			Active: true,
+		},
+	}
+	configuredIPs = map[string]struct{}{"keep.example.org": {}}
+
+	ApplyServerConfig([]data.PingableServer{{Name: "Keep", IP: "keep.example.org", Type: "PC"}})
+
+	if _, ok := serverCacheMap["remove.example.org"]; !ok {
+		t.Fatal("expected removed server record to stay in cache")
+	}
+	if serverCacheMap["remove.example.org"].Active || serverCacheMap["remove.example.org"].Online {
+		t.Fatal("expected removed server to be hidden from API and ping loop")
+	}
+	if !isConfiguredServer("keep.example.org") {
+		t.Fatal("expected configured server to remain whitelisted")
+	}
+
+	servers := GetAllServers()
+	if len(servers) != 1 || servers[0].IP != "keep.example.org" {
+		t.Fatalf("expected only configured active server to be returned, got %#v", servers)
+	}
+}

@@ -40,7 +40,16 @@ var pingLimit = make(chan struct{}, maxConcurrentPings)
 var (
 	serverCacheMu  sync.RWMutex
 	serverCacheMap = make(map[string]data.Server, 128)
+	configMu       sync.RWMutex
+	configuredIPs  = make(map[string]struct{}, 128)
 )
+
+func isConfiguredServer(ip string) bool {
+	configMu.RLock()
+	_, ok := configuredIPs[ip]
+	configMu.RUnlock()
+	return ok
+}
 
 // GetAllServers returns a snapshot of every active server's live state.
 func GetAllServers() []data.Server {
@@ -48,6 +57,9 @@ func GetAllServers() []data.Server {
 	defer serverCacheMu.RUnlock()
 	result := make([]data.Server, 0, len(serverCacheMap))
 	for _, s := range serverCacheMap {
+		if !isConfiguredServer(s.IP) {
+			continue
+		}
 		if s.Active && s.Online {
 			result = append(result, s)
 		}
@@ -56,17 +68,23 @@ func GetAllServers() []data.Server {
 }
 
 func ApplyServerConfig(servers []data.PingableServer) {
-	allowed := make(map[string]data.PingableServer, len(servers))
+	allowed := make(map[string]struct{}, len(servers))
 	for _, srv := range servers {
-		allowed[srv.IP] = srv
+		allowed[srv.IP] = struct{}{}
 	}
+
+	configMu.Lock()
+	configuredIPs = allowed
+	configMu.Unlock()
 
 	serverCacheMu.Lock()
 	defer serverCacheMu.Unlock()
 
-	for ip := range serverCacheMap {
+	for ip, current := range serverCacheMap {
 		if _, ok := allowed[ip]; !ok {
-			delete(serverCacheMap, ip)
+			current.Active = false
+			current.Online = false
+			serverCacheMap[ip] = current
 		}
 	}
 
@@ -74,14 +92,20 @@ func ApplyServerConfig(servers []data.PingableServer) {
 		if existing, ok := serverCacheMap[cfg.IP]; ok {
 			existing.Name = cfg.Name
 			existing.Type = cfg.Type
+			existing.Active = true
 			serverCacheMap[cfg.IP] = existing
 		}
 	}
 }
 
 // isServerActive reports whether a server is marked active in the cache.
-// Servers not yet cached (first encounter) are treated as active by default.
+// Servers not yet cached (first encounter) are treated as active by default only
+// when they are still part of the configured server list.
 func isServerActive(ip string) bool {
+	if !isConfiguredServer(ip) {
+		return false
+	}
+
 	serverCacheMu.RLock()
 	defer serverCacheMu.RUnlock()
 	s, ok := serverCacheMap[ip]

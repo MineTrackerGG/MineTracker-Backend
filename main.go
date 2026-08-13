@@ -61,6 +61,7 @@ func main() {
 	if err != nil {
 		util.Logger.Warn().Err(err).Msg("Failed to load server cache from MongoDB")
 	}
+	task.ApplyServerConfig(Servers)
 
 	err = data.InitCache()
 	if err != nil {
