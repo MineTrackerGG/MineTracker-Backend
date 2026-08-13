@@ -55,6 +55,30 @@ func GetAllServers() []data.Server {
 	return result
 }
 
+func ApplyServerConfig(servers []data.PingableServer) {
+	allowed := make(map[string]data.PingableServer, len(servers))
+	for _, srv := range servers {
+		allowed[srv.IP] = srv
+	}
+
+	serverCacheMu.Lock()
+	defer serverCacheMu.Unlock()
+
+	for ip := range serverCacheMap {
+		if _, ok := allowed[ip]; !ok {
+			delete(serverCacheMap, ip)
+		}
+	}
+
+	for _, cfg := range servers {
+		if existing, ok := serverCacheMap[cfg.IP]; ok {
+			existing.Name = cfg.Name
+			existing.Type = cfg.Type
+			serverCacheMap[cfg.IP] = existing
+		}
+	}
+}
+
 // isServerActive reports whether a server is marked active in the cache.
 // Servers not yet cached (first encounter) are treated as active by default.
 func isServerActive(ip string) bool {
@@ -132,19 +156,29 @@ func NewServerJob(interval time.Duration, servers []data.PingableServer) *PingJo
 	}
 }
 
+func (j *PingJob) UpdateServers(servers []data.PingableServer) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.servers = servers
+}
+
 func (j *PingJob) StartServerJob(ctx context.Context) {
 	var wg sync.WaitGroup
+
+	j.mu.RLock()
+	servers := append([]data.PingableServer(nil), j.servers...)
+	j.mu.RUnlock()
 
 	// Spread goroutine startup evenly across one full tick interval so that
 	// pings never all fire simultaneously. Without this, all 63 goroutines
 	// wake at t=0, 1, 2, ... causing a burst of allocations that triggers
 	// continuous GC (bufio.Reader, json.Decoder, maps per ping × 63).
 	var stagger time.Duration
-	if n := len(j.servers); n > 1 {
+	if n := len(servers); n > 1 {
 		stagger = time.Second / time.Duration(n)
 	}
 
-	for i, server := range j.servers {
+	for i, server := range servers {
 		wg.Add(1)
 		go func(srv data.PingableServer, idx int) {
 			defer wg.Done()
@@ -310,6 +344,18 @@ func refreshActiveStatus(ctx context.Context) {
 
 	serverCacheMu.Lock()
 	defer serverCacheMu.Unlock()
+
+	activeByIP := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		activeByIP[e.IP] = e.Active
+	}
+
+	for ip := range serverCacheMap {
+		if _, ok := activeByIP[ip]; !ok {
+			delete(serverCacheMap, ip)
+		}
+	}
+
 	for _, e := range entries {
 		if s, ok := serverCacheMap[e.IP]; ok {
 			s.Active = e.Active

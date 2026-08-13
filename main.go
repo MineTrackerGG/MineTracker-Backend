@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
+
+const serversConfigPath = "servers.json"
 
 func main() {
 	_ = godotenv.Load()
@@ -39,7 +42,7 @@ func main() {
 
 	util.Logger.Info().Msg("Connected to InfluxDB!")
 
-	Servers, err := data.LoadServers("servers.json")
+	Servers, err := data.LoadServers(serversConfigPath)
 
 	if err != nil {
 		util.Logger.Fatal().Err(err).Msg("Failed to load servers.json")
@@ -52,6 +55,7 @@ func main() {
 	task.StartActiveStatusSync(ctx)
 
 	go pingJob.StartServerJob(ctx)
+	go watchServerConfig(ctx, pingJob)
 
 	err = task.LoadServerCache(ctx)
 	if err != nil {
@@ -64,7 +68,7 @@ func main() {
 		return
 	}
 
-	util.Logger.Info().Msg("Loaded " + strconv.Itoa(len(Servers)) + " servers from servers.json")
+	util.Logger.Info().Msg("Loaded " + strconv.Itoa(len(Servers)) + " servers from " + serversConfigPath)
 
 	go func() {
 		if os.Getenv("DEPLOYMENT_MODE") == "production" || os.Getenv("DEPLOYMENT_MODE") == "release" {
@@ -116,4 +120,46 @@ func main() {
 	database.MongoClient.Disconnect(ctx)
 	serverJobCancel()
 	util.Logger.Info().Msg("Shutting down MineTracker...")
+}
+
+func watchServerConfig(ctx context.Context, pingJob *task.PingJob) {
+	var lastModNano atomic.Int64
+
+	stat, err := os.Stat(serversConfigPath)
+	if err == nil {
+		lastModNano.Store(stat.ModTime().UnixNano())
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			stat, err := os.Stat(serversConfigPath)
+			if err != nil {
+				util.Logger.Warn().Err(err).Msg("Failed to stat servers config")
+				continue
+			}
+
+			modNano := stat.ModTime().UnixNano()
+			if modNano == lastModNano.Load() {
+				continue
+			}
+
+			servers, err := data.LoadServers(serversConfigPath)
+			if err != nil {
+				util.Logger.Warn().Err(err).Msg("Failed to reload servers config")
+				continue
+			}
+
+			pingJob.UpdateServers(servers)
+			task.ApplyServerConfig(servers)
+			lastModNano.Store(modNano)
+			util.Logger.Info().Msg("Reloaded servers config")
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }
