@@ -1,0 +1,63 @@
+services:
+  monitor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    pids_limit: 100
+    cpus: 1.0
+    environment:
+      HTTP_PORT: 8080
+      MONGO_URI: mongodb://monitor:${MONGO_PASSWORD:?required}@mongo:27017/?authSource=admin
+      INFLUXDB_URL: http://influx:8086
+      INFLUXDB_ORG: verone
+      INFLUXDB_BUCKET: minecraft
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:?required}
+      MONITOR_READ_TOKEN: ${MONITOR_READ_TOKEN:?required}
+      MONITOR_ADMIN_TOKEN: ${MONITOR_ADMIN_TOKEN:?required}
+    ports: ["127.0.0.1:${MONITOR_PORT:-18080}:8080"]
+    depends_on:
+      mongo: { condition: service_healthy }
+      influx: { condition: service_healthy }
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: monitor
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?required}
+    volumes: ["mongo-data:/data/db"]
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD-SHELL, "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+  influx:
+    image: influxdb:2.7
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: monitor
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:?required}
+      DOCKER_INFLUXDB_INIT_ORG: verone
+      DOCKER_INFLUXDB_INIT_BUCKET: minecraft
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:?required}
+      DOCKER_INFLUXDB_INIT_RETENTION: 90d
+    volumes: ["influx-data:/var/lib/influxdb2", "influx-config:/etc/influxdb2"]
+    mem_limit: 768m
+    healthcheck:
+      test: [CMD, influx, ping]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+volumes:
+  mongo-data:
+  influx-data:
+  influx-config:

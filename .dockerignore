@@ -1,0 +1,5 @@
+.git
+.env
+deploy/.env
+**/*_test.go
+backups

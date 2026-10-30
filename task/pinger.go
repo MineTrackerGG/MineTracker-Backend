@@ -17,6 +17,7 @@ import (
 type mcPingResult struct {
 	PlayerCount int
 	Favicon     string
+	MaxPlayers  *int
 }
 
 // serverPinger is satisfied by pooledPinger (and by test fakes).
@@ -139,9 +140,14 @@ func slpSendHandshake(conn net.Conn, host string, port uint16) error {
 
 // slpReadResponse reads and parses the SLP status-response packet.
 func slpReadResponse(r *bufio.Reader) (*mcPingResult, error) {
-	// Packet length varint — discard, bufio handles framing for us.
-	if _, err := binary.ReadUvarint(r); err != nil {
+	// Reject frames whose declared length does not match the JSON payload.
+	packetLen, err := binary.ReadUvarint(r)
+	if err != nil {
 		return nil, err
+	}
+
+	if packetLen < 4 || packetLen > (1<<20)+6 {
+		return nil, errors.New("mcping: invalid packet length")
 	}
 
 	// Packet ID must be 0x00.
@@ -158,7 +164,9 @@ func slpReadResponse(r *bufio.Reader) (*mcPingResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if jsonLen < 2 || jsonLen > 1<<20 {
+	var encoded [10]byte
+	lengthBytes := binary.PutUvarint(encoded[:], jsonLen)
+	if jsonLen < 2 || jsonLen > 1<<20 || uint64(1+lengthBytes)+jsonLen != packetLen {
 		return nil, errors.New("mcping: invalid JSON length")
 	}
 
@@ -183,14 +191,21 @@ func slpReadResponse(r *bufio.Reader) (*mcPingResult, error) {
 	// which boxed every JSON value as interface{} and allocated heavily.
 	var resp struct {
 		Players struct {
-			Online int `json:"online"`
+			Online *int `json:"online"`
+			Max    *int `json:"max"`
 		} `json:"players"`
 		Favicon string `json:"favicon"`
 	}
 	if err := json.Unmarshal(jsonBytes, &resp); err != nil {
 		return nil, err
 	}
-	return &mcPingResult{PlayerCount: resp.Players.Online, Favicon: resp.Favicon}, nil
+	if resp.Players.Online == nil || *resp.Players.Online < 0 || *resp.Players.Online > 1000000 {
+		return nil, errors.New("mcping: player count unavailable")
+	}
+	if resp.Players.Max != nil && (*resp.Players.Max < 0 || *resp.Players.Max > 1000000) {
+		return nil, errors.New("mcping: invalid maximum player count")
+	}
+	return &mcPingResult{PlayerCount: *resp.Players.Online, Favicon: resp.Favicon, MaxPlayers: resp.Players.Max}, nil
 }
 
 // ---- Minecraft varint / string encoding helpers ----------------------------
