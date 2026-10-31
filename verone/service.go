@@ -11,6 +11,7 @@ import (
 
 type Service struct {
 	Store     Store
+	Hosting   *Hosting
 	mutation  sync.Mutex
 	mu        sync.Mutex
 	last      map[string]time.Time
@@ -40,7 +41,7 @@ func (s *Service) Run(ctx context.Context) {
 
 func (s *Service) schedule(ctx context.Context, wg *sync.WaitGroup) {
 	query, cancel := dbContext(ctx)
-	configs, err := s.Store.Configs(query)
+	configs, err := s.configs(query)
 	cancel()
 	if err != nil {
 		util.Logger.Error().Msg("monitor_config_read_failed")
@@ -104,7 +105,7 @@ func (s *Service) collect(ctx context.Context, c Config) {
 	defer s.mutation.Unlock()
 	dbctx, stop := dbContext(ctx)
 	defer stop()
-	configs, err := s.Store.Configs(dbctx)
+	configs, err := s.configs(dbctx)
 	if err != nil {
 		return
 	}

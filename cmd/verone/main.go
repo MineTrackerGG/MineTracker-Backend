@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -33,6 +34,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	s := verone.New(&verone.DatabaseStore{Mongo: database.MongoClient.Database("minetracker"), Influx: database.InfluxClient})
+	var hostingDone chan struct{}
+	if panelURL, token := os.Getenv("PTERODACTYL_URL"), os.Getenv("PTERODACTYL_APPLICATION_TOKEN"); panelURL != "" || token != "" {
+		source, err := verone.NewPterodactyl(panelURL, token)
+		if err != nil {
+			util.Logger.Fatal().Msg("Invalid Pterodactyl configuration")
+		}
+		interval := 300
+		if value := os.Getenv("PTERODACTYL_SYNC_INTERVAL"); value != "" {
+			interval, err = strconv.Atoi(value)
+			if err != nil || interval < 60 || interval > 3600 {
+				util.Logger.Fatal().Msg("Invalid inventory sync interval")
+			}
+		}
+		s.Hosting = &verone.Hosting{Service: s, Repository: &verone.MongoHostingRepository{DB: database.MongoClient.Database("minetracker")}, Source: source, Panel: panelURL, Interval: time.Duration(interval) * time.Second}
+		hostingDone = make(chan struct{})
+		go func() { defer close(hostingDone); s.Hosting.Run(ctx) }()
+	}
 	done := make(chan struct{})
 	go func() { defer close(done); s.Run(ctx) }()
 	port := os.Getenv("HTTP_PORT")
@@ -52,6 +70,9 @@ func main() {
 	defer cancel()
 	_ = server.Shutdown(shutdown)
 	<-done
+	if hostingDone != nil {
+		<-hostingDone
+	}
 	database.InfluxClient.Close()
 	_ = database.MongoClient.Disconnect(shutdown)
 }

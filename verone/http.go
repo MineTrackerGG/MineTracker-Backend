@@ -96,7 +96,22 @@ func Router(s *Service, readToken, adminToken string) *gin.Engine {
 				exists = true
 			}
 		}
-		if !exists && len(configs) >= 1000 {
+		hostingCount := 0
+		if s.Hosting != nil {
+			state, loadErr := s.Hosting.Repository.Load(ctx)
+			if loadErr != nil {
+				c.Status(503)
+				return
+			}
+			hostingCount = len(state.Rows)
+			for _, row := range state.Rows {
+				if row.MonitorID == cfg.ID {
+					c.Status(409)
+					return
+				}
+			}
+		}
+		if !exists && len(configs)+hostingCount >= 1000 {
 			c.JSON(409, gin.H{"error": "capacity_reached"})
 			return
 		}
@@ -165,5 +180,6 @@ func Router(s *Service, readToken, adminToken string) *gin.Engine {
 		}
 		c.JSON(200, gin.H{"points": points, "period": period, "aggregation": "maximum"})
 	})
+	hostingRoutes(r, s)
 	return r
 }
