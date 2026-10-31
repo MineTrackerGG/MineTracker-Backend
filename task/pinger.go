@@ -18,6 +18,7 @@ type mcPingResult struct {
 	PlayerCount int
 	Favicon     string
 	MaxPlayers  *int
+	Proxy       bool
 }
 
 // serverPinger is satisfied by pooledPinger (and by test fakes).
@@ -195,6 +196,9 @@ func slpReadResponse(r *bufio.Reader) (*mcPingResult, error) {
 			Max    *int `json:"max"`
 		} `json:"players"`
 		Favicon string `json:"favicon"`
+		Version struct {
+			Name string `json:"name"`
+		} `json:"version"`
 	}
 	if err := json.Unmarshal(jsonBytes, &resp); err != nil {
 		return nil, err
@@ -205,7 +209,7 @@ func slpReadResponse(r *bufio.Reader) (*mcPingResult, error) {
 	if resp.Players.Max != nil && (*resp.Players.Max < 0 || *resp.Players.Max > 1000000) {
 		return nil, errors.New("mcping: invalid maximum player count")
 	}
-	return &mcPingResult{PlayerCount: *resp.Players.Online, Favicon: resp.Favicon, MaxPlayers: resp.Players.Max}, nil
+	return &mcPingResult{PlayerCount: *resp.Players.Online, Favicon: resp.Favicon, MaxPlayers: resp.Players.Max, Proxy: proxyVersion(resp.Version.Name)}, nil
 }
 
 // ---- Minecraft varint / string encoding helpers ----------------------------
@@ -229,4 +233,14 @@ func putMCString(buf []byte, s string) int {
 	n := putMCVarint(buf, uint32(len(s)))
 	copy(buf[n:], s)
 	return n + len(s)
+}
+
+func proxyVersion(version string) bool {
+	version = strings.ToLower(version)
+	for _, marker := range []string{"velocity", "bungeecord", "bungee", "waterfall", "geyser standalone", "geyser-standalone", "geyser_standalone", "viaproxy"} {
+		if strings.Contains(version, marker) {
+			return true
+		}
+	}
+	return false
 }

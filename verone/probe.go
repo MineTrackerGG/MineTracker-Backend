@@ -148,15 +148,16 @@ func Probe(ctx context.Context, e Endpoint, bedrock bool) Reading {
 	var players int
 	var max *int
 	var latency int64
+	var proxy bool
 	if bedrock {
 		players, max, latency, err = pingBedrock(conn)
 	} else {
-		players, max, latency, err = task.PingJavaConnection(conn, e.Host, port)
+		players, max, latency, proxy, err = task.PingJavaConnectionDetails(conn, e.Host, port)
 	}
 	if err != nil {
 		return Reading{Status: "no_response"}
 	}
-	return Reading{Status: "online", Players: &players, MaxPlayers: max, LatencyMS: &latency}
+	return Reading{Proxy: proxy, Status: "online", Players: &players, MaxPlayers: max, LatencyMS: &latency}
 }
 
 var raknetMagic = []byte{0, 255, 255, 0, 254, 254, 254, 254, 253, 253, 253, 253, 18, 52, 86, 120}

@@ -9,6 +9,7 @@ type Endpoint struct {
 }
 
 type Config struct {
+	Hosting  bool      `json:"-" bson:"-"`
 	ID       string    `json:"id" bson:"_id"`
 	Revision int64     `json:"revision" bson:"revision"`
 	Enabled  bool      `json:"enabled" bson:"enabled"`
@@ -19,6 +20,7 @@ type Config struct {
 }
 
 type Reading struct {
+	Proxy      bool   `json:"-" bson:"proxy,omitempty"`
 	Status     string `json:"status" bson:"status"`
 	Players    *int   `json:"players" bson:"players"`
 	MaxPlayers *int   `json:"maxPlayers" bson:"maxPlayers"`
@@ -26,6 +28,7 @@ type Reading struct {
 }
 
 type Snapshot struct {
+	Proxy      bool      `json:"-" bson:"proxy,omitempty"`
 	ID         string    `json:"id" bson:"_id"`
 	Revision   int64     `json:"revision" bson:"revision"`
 	Status     string    `json:"status" bson:"status"`

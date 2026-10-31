@@ -31,14 +31,17 @@ type Participation struct {
 	Query       HostingQuery `json:"query" bson:"query"`
 }
 type HostingRow struct {
-	ID            string `json:"id" bson:"id"`
-	MonitorID     string `json:"monitorId" bson:"monitorId"`
-	Name          string `json:"name" bson:"name"`
-	Participation `bson:",inline"`
-	Present       bool         `json:"present" bson:"present"`
-	Suspended     bool         `json:"suspended" bson:"suspended"`
-	Allocations   []Allocation `json:"allocations" bson:"allocations"`
-	Snapshot      *Snapshot    `json:"snapshot" bson:"-"`
+	ID               string `json:"id" bson:"id"`
+	MonitorID        string `json:"monitorId" bson:"monitorId"`
+	Name             string `json:"name" bson:"name"`
+	Participation    `bson:",inline"`
+	Present          bool         `json:"present" bson:"present"`
+	Suspended        bool         `json:"suspended" bson:"suspended"`
+	Allocations      []Allocation `json:"allocations" bson:"allocations"`
+	Automatic        bool         `json:"automatic" bson:"automatic"`
+	Discovery        Discovery    `json:"discovery" bson:"discovery"`
+	DiscoveryVersion int          `json:"-" bson:"discoveryVersion"`
+	Snapshot         *Snapshot    `json:"snapshot" bson:"-"`
 }
 type HostingState struct {
 	Panel    string       `bson:"panel"`
@@ -124,6 +127,12 @@ func (h *Hosting) Sync(ctx context.Context) error {
 			row.Name = item.Name
 			row.Suspended = item.Suspended
 			row.Allocations = item.Allocations
+			row.Discovery = item.Discovery
+			if row.Automatic || row.DiscoveryVersion == 0 {
+				row.Participation = automaticParticipation(item, row.Revision)
+				row.Automatic = true
+			}
+			row.DiscoveryVersion = 1
 			delete(byID, row.ID)
 		}
 		if !reflect.DeepEqual(old, *row) {
@@ -131,7 +140,7 @@ func (h *Hosting) Sync(ctx context.Context) error {
 		}
 	}
 	for _, item := range byID {
-		state.Rows = append(state.Rows, HostingRow{ID: item.ID, MonitorID: uuid.NewSHA1(uuid.NameSpaceURL, []byte(panelIdentity(h.Panel)+":"+item.ID)).String(), Name: item.Name, Present: true, Suspended: item.Suspended, Allocations: item.Allocations, Participation: Participation{Revision: 1, Role: "pending", Enabled: true, Mode: "backends", Query: HostingQuery{}}})
+		state.Rows = append(state.Rows, HostingRow{ID: item.ID, MonitorID: uuid.NewSHA1(uuid.NameSpaceURL, []byte(panelIdentity(h.Panel)+":"+item.ID)).String(), Name: item.Name, Present: true, Suspended: item.Suspended, Allocations: item.Allocations, Automatic: true, Discovery: item.Discovery, DiscoveryVersion: 1, Participation: automaticParticipation(item, 1)})
 	}
 	configs, err := h.Service.Store.Configs(dbctx)
 	if err != nil {
@@ -264,6 +273,8 @@ func (h *Hosting) Update(ctx context.Context, id string, p Participation) (Hosti
 			}
 		}
 		row.Participation = p
+		row.Automatic = false
+		row.DiscoveryVersion = 1
 		state.Rows[i] = row
 		if err := h.Repository.Save(ctx, state); err != nil {
 			return HostingRow{}, err
@@ -283,7 +294,7 @@ func (h *Hosting) configs(state HostingState) []Config {
 		if row.EditorialID != nil {
 			continue
 		}
-		configs = append(configs, Config{ID: row.MonitorID, Revision: row.Revision, Enabled: h.fresh(state) && row.Present && !row.Suspended && row.Enabled && row.Role != "pending" && row.Role != "excluded" && queryAllowed(row, row.Query), Interval: 60, Java: row.Query.Java, Bedrock: row.Query.Bedrock})
+		configs = append(configs, Config{Hosting: true, ID: row.MonitorID, Revision: row.Revision, Enabled: h.fresh(state) && row.Present && !row.Suspended && row.Enabled && row.Role != "pending" && row.Role != "excluded" && row.Discovery.Kind != "proxy" && row.Discovery.Kind != "other" && (row.Query.Java != nil || row.Query.Bedrock != nil) && queryAllowed(row, row.Query), Interval: 60, Java: row.Query.Java, Bedrock: row.Query.Bedrock})
 	}
 	return configs
 }

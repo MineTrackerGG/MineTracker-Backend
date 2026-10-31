@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,8 @@ type InventoryServer struct {
 	ID, Name    string
 	Suspended   bool
 	Allocations []Allocation
+	Primary     *Allocation
+	Discovery   Discovery
 }
 type InventorySource interface {
 	Fetch(context.Context) ([]InventoryServer, error)
@@ -72,7 +75,7 @@ func (p *Pterodactyl) Fetch(ctx context.Context) ([]InventoryServer, error) {
 	for page := 1; page <= 10; page++ {
 		u := *p.base
 		u.Path = "/api/application/servers"
-		u.RawQuery = fmt.Sprintf("include=allocations&per_page=100&page=%d", page)
+		u.RawQuery = fmt.Sprintf("include=allocations,egg&per_page=100&page=%d", page)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, err
@@ -86,14 +89,22 @@ func (p *Pterodactyl) Fetch(ctx context.Context) ([]InventoryServer, error) {
 		var body struct {
 			Data []struct {
 				Attributes struct {
-					UUID          string  `json:"uuid"`
-					Name          string  `json:"name"`
-					Suspended     bool    `json:"suspended"`
-					Status        *string `json:"status"`
+					UUID          string         `json:"uuid"`
+					Name          string         `json:"name"`
+					Suspended     bool           `json:"suspended"`
+					Status        *string        `json:"status"`
+					PrimaryID     int64          `json:"allocation"`
+					Container     panelContainer `json:"container"`
 					Relationships struct {
+						Egg *struct {
+							Attributes *struct {
+								Name string `json:"name"`
+							} `json:"attributes"`
+						} `json:"egg"`
 						Allocations *struct {
 							Data []struct {
 								Attributes struct {
+									ID   int64  `json:"id"`
 									IP   string `json:"ip"`
 									Port uint16 `json:"port"`
 								} `json:"attributes"`
@@ -129,15 +140,35 @@ func (p *Pterodactyl) Fetch(ctx context.Context) ([]InventoryServer, error) {
 			}
 			seen[a.UUID] = true
 			row := InventoryServer{ID: a.UUID, Name: a.Name, Suspended: a.Suspended || a.Status != nil, Allocations: []Allocation{}}
+			egg := ""
+			if a.Relationships.Egg != nil && a.Relationships.Egg.Attributes != nil {
+				egg = a.Relationships.Egg.Attributes.Name
+			}
+			row.Discovery = discover(a.Container, egg)
 			if len(a.Relationships.Allocations.Data) > 64 {
 				return nil, errors.New("too many allocations")
 			}
 			for _, allocation := range a.Relationships.Allocations.Data {
 				endpoint := Endpoint{Host: allocation.Attributes.IP, Port: allocation.Attributes.Port}
 				if ip, parseErr := netip.ParseAddr(endpoint.Host); parseErr == nil && PublicIP(ip) && ValidEndpoint(&endpoint, false) {
-					row.Allocations = append(row.Allocations, Allocation{Host: ip.Unmap().String(), Port: endpoint.Port})
+					value := Allocation{Host: ip.Unmap().String(), Port: endpoint.Port}
+					row.Allocations = append(row.Allocations, value)
+					if a.PrimaryID > 0 && allocation.Attributes.ID == a.PrimaryID {
+						if row.Primary != nil {
+							return nil, errors.New("duplicate primary allocation")
+						}
+						copy := value
+						row.Primary = &copy
+					}
 				}
 			}
+			sort.Slice(row.Allocations, func(i, j int) bool {
+				a, b := row.Allocations[i], row.Allocations[j]
+				if a.Host == b.Host {
+					return a.Port < b.Port
+				}
+				return a.Host < b.Host
+			})
 			result = append(result, row)
 		}
 		if page == pg.Total {

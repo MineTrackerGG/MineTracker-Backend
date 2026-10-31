@@ -21,3 +21,16 @@ func TestSLPRejectsMalformedFrames(t *testing.T) {
 		t.Fatal("accepted mismatched frame length")
 	}
 }
+
+func TestVeronePrivateProxyHint(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		proxy bool
+	}{{"Velocity 3.4", true}, {"BungeeCord 1.21", true}, {"Waterfall", true}, {"Geyser Standalone", true}, {"Paper 1.21", false}, {"Paper 1.21 + Geyser plugin", false}, {"Fabric 1.21", false}} {
+		payload := []byte(`{"version":{"name":"` + tc.name + `"},"players":{"online":8,"max":100}}`)
+		result, err := slpReadResponse(bufio.NewReader(bytes.NewReader(buildSLPPacket(0, payload))))
+		if err != nil || result.Proxy != tc.proxy || result.PlayerCount != 8 {
+			t.Fatalf("%s %+v %v", tc.name, result, err)
+		}
+	}
+}

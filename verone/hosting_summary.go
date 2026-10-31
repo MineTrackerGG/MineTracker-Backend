@@ -34,7 +34,7 @@ func (h *Hosting) summary(state HostingState, configs map[string]Config, snapsho
 	selected := []HostingRow{}
 	groups := map[string][]HostingRow{}
 	for _, row := range state.Rows {
-		if !row.Present || !row.Enabled || row.Role == "excluded" {
+		if !row.Present || !row.Enabled || (row.Role == "excluded" || row.Role == "proxy" || row.Discovery.Kind == "proxy" || row.Discovery.Kind == "other") {
 			continue
 		}
 		switch row.Role {
@@ -51,25 +51,13 @@ func (h *Hosting) summary(state HostingState, configs map[string]Config, snapsho
 		}
 	}
 	for _, rows := range groups {
-		mode := rows[0].Mode
-		valid := true
-		chosen := []HostingRow{}
 		for _, row := range rows {
-			if row.Mode != mode {
-				valid = false
+			if row.Role == "backend" {
+				selected = append(selected, row)
+			} else {
+				out.Coverage.Pending++
 			}
-			if mode == "backends" && row.Role == "backend" || mode == "proxy" && row.Role == "proxy" && row.Authority {
-				chosen = append(chosen, row)
-			}
 		}
-		if len(chosen) == 0 || mode == "proxy" && len(chosen) != 1 {
-			valid = false
-		}
-		if !valid {
-			out.Coverage.Pending++
-			continue
-		}
-		selected = append(selected, chosen...)
 	}
 	// Reject all overlapping sources rather than making map iteration choose a winner.
 	duplicates := map[string]int{}
@@ -91,7 +79,6 @@ func (h *Hosting) summary(state HostingState, configs map[string]Config, snapsho
 	}
 	total := 0
 	for _, row := range selected {
-		out.Coverage.Eligible++
 		key := row.MonitorID
 		if row.EditorialID != nil {
 			key = *row.EditorialID
@@ -104,6 +91,13 @@ func (h *Hosting) summary(state HostingState, configs map[string]Config, snapsho
 		}
 		cfg, valid := effectiveHostingConfig(row, configs)
 		p := snapshots[key]
+		if valid && p.Proxy && p.Revision == cfg.Revision && time.Since(p.UpdatedAt) <= 180*time.Second && time.Since(p.UpdatedAt) <= time.Duration(cfg.Interval*3)*time.Second && time.Until(p.UpdatedAt) <= time.Minute {
+			continue
+		}
+		out.Coverage.Eligible++
+		if row.Automatic && row.Discovery.Uncertain {
+			out.Coverage.Pending++
+		}
 		if row.Suspended || duplicate || !valid || p.Revision != cfg.Revision || p.Status != "online" || p.Players == nil || *p.Players < 0 || time.Since(p.UpdatedAt) > 180*time.Second || time.Since(p.UpdatedAt) > time.Duration(cfg.Interval*3)*time.Second || time.Until(p.UpdatedAt) > time.Minute {
 			continue
 		}

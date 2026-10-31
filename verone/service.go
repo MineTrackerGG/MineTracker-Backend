@@ -100,6 +100,17 @@ func (s *Service) collect(ctx context.Context, c Config) {
 			break
 		}
 	}
+	for _, r := range []*Reading{p.Java, p.Bedrock} {
+		if r != nil && r.Proxy {
+			p.Proxy = true
+		}
+	}
+	if c.Hosting && p.Proxy {
+		p.Status = "unknown"
+		p.Players = nil
+		p.MaxPlayers = nil
+		p.LatencyMS = nil
+	}
 	p.UpdatedAt = time.Now().UTC()
 	s.mutation.Lock()
 	defer s.mutation.Unlock()

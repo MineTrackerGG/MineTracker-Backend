@@ -3,6 +3,7 @@ package verone
 import (
 	"context"
 	"encoding/json"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"io"
 	"net/http"
 	"net/netip"
@@ -15,9 +16,9 @@ import (
 type hostingMemory struct{ state HostingState }
 
 func (m *hostingMemory) Load(context.Context) (HostingState, error) {
-	b, _ := json.Marshal(m.state)
+	b, _ := bson.Marshal(m.state)
 	var state HostingState
-	json.Unmarshal(b, &state)
+	bson.Unmarshal(b, &state)
 	return state, nil
 }
 func (m *hostingMemory) Save(_ context.Context, state HostingState) error {
@@ -48,7 +49,7 @@ func TestHostingPaginationAndPanelRebinding(t *testing.T) {
 	calls := 0
 	panel.client.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer secret" || r.URL.Path != "/api/application/servers" || r.URL.Query().Get("include") != "allocations" {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer secret" || r.URL.Path != "/api/application/servers" || r.URL.Query().Get("include") != "allocations,egg" {
 			t.Fatal("unexpected inventory request")
 		}
 		id := testID
@@ -98,54 +99,39 @@ func hostingRow(id, role, group, mode string, n int) (HostingRow, Snapshot) {
 }
 func TestHostingProxyDedupFreshnessSuspension(t *testing.T) {
 	h, repo, _ := hostingFixture()
-	proxy, p := hostingRow("proxy", "proxy", "network", "backends", 10)
-	a, pa := hostingRow("a", "backend", "network", "backends", 4)
-	b, pb := hostingRow("b", "backend", "network", "backends", 6)
+	proxy, p := hostingRow("proxy", "proxy", "network", "proxy", 10)
+	proxy.Authority = true
+	a, pa := hostingRow("a", "backend", "network", "proxy", 4)
+	b, pb := hostingRow("b", "backend", "network", "proxy", 6)
 	repo.state.Rows = []HostingRow{proxy, a, b}
-	cfg := map[string]Config{}
+	configs := map[string]Config{}
 	for _, c := range h.configs(repo.state) {
-		cfg[c.ID] = c
+		configs[c.ID] = c
 	}
 	snap := map[string]Snapshot{p.ID: p, pa.ID: pa, pb.ID: pb}
-	out := h.summary(repo.state, cfg, snap)
-	if out.Players == nil || *out.Players != 10 || out.State != "complete" || out.Coverage.Eligible != 2 {
-		t.Fatalf("backends %+v", out)
+	out := h.summary(repo.state, configs, snap)
+	if out.Players == nil || *out.Players != 10 || out.Coverage.Eligible != 2 || out.State != "complete" {
+		t.Fatalf("backend-only %+v", out)
 	}
-	for i := range repo.state.Rows {
-		repo.state.Rows[i].Mode = "proxy"
+	repo.state.Rows[1].Suspended = true
+	out = h.summary(repo.state, configs, snap)
+	if out.Players == nil || *out.Players != 6 || out.State != "partial" {
+		t.Fatal("suspended backend counted")
 	}
-	repo.state.Rows[0].Authority = true
-	out = h.summary(repo.state, cfg, snap)
-	if out.Players == nil || *out.Players != 10 || out.Coverage.Eligible != 1 {
-		t.Fatalf("proxy %+v", out)
-	}
-	repo.state.Rows[0].Suspended = true
-	out = h.summary(repo.state, cfg, snap)
-	if out.Players != nil || out.State != "unavailable" {
-		t.Fatal("suspension counted old snapshot")
-	}
-	repo.state.Rows[0].Suspended = false
-	p.UpdatedAt = time.Now().Add(-181 * time.Second)
-	snap[p.ID] = p
-	out = h.summary(repo.state, cfg, snap)
+	pb.UpdatedAt = time.Now().Add(-181 * time.Second)
+	snap[pb.ID] = pb
+	out = h.summary(repo.state, configs, snap)
 	if out.Players != nil {
-		t.Fatal("stale counted")
+		t.Fatal("stale backend counted")
 	}
-	now := time.Now()
-	p.UpdatedAt = now
-	snap[p.ID] = p
-	repo.state.Rows = append(repo.state.Rows, HostingRow{ID: "pending", Present: true, Participation: Participation{Enabled: true, Role: "pending"}})
-	out = h.summary(repo.state, cfg, snap)
-	if out.State != "partial" || out.Coverage.Pending != 1 {
-		t.Fatal("pending hidden")
-	}
-	old := now.Add(-4 * time.Minute)
+	old := time.Now().Add(-4 * time.Minute)
 	repo.state.SyncedAt = &old
-	out = h.summary(repo.state, cfg, snap)
-	if out.State != "unavailable" || out.Players != nil {
-		t.Fatal("stale inventory accepted")
+	out = h.summary(repo.state, configs, snap)
+	if out.Players != nil {
+		t.Fatal("stale inventory counted")
 	}
 }
+
 func TestHostingSyncIdentityRemovalAndEditorialGuard(t *testing.T) {
 	h, repo, store := hostingFixture()
 	source := &inventoryFake{rows: []InventoryServer{{ID: testID, Name: "private", Allocations: []Allocation{{Host: "8.8.8.8", Port: 25565}}}}}
@@ -155,8 +141,8 @@ func TestHostingSyncIdentityRemovalAndEditorialGuard(t *testing.T) {
 	}
 	row := repo.state.Rows[0]
 	id := row.MonitorID
-	if row.Role != "pending" || row.Revision != 1 {
-		t.Fatal("auto trusted inventory")
+	if row.Role != "standalone" || row.Revision != 1 {
+		t.Fatal("auto inventory not configured")
 	}
 	row.Role = "standalone"
 	row.Query.Java = &Endpoint{Host: "8.8.8.8", Port: 25565}
@@ -242,8 +228,8 @@ func TestHostingCrossplayAndAmbiguousProxies(t *testing.T) {
 	snapshots[pa.ID] = pa
 	snapshots[pb.ID] = pb
 	out = h.summary(repo.state, configs, snapshots)
-	if out.Players != nil || out.Coverage.Pending != 1 {
-		t.Fatal("ambiguous proxies counted")
+	if out.Players != nil || out.Coverage.Eligible != 0 {
+		t.Fatal("proxies counted")
 	}
 	b.Role = "standalone"
 	b.Group = nil
