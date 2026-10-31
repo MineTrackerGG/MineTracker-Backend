@@ -105,8 +105,8 @@ func (m *memoryStore) Record(_ context.Context, p Snapshot) error {
 	m.snapshots = []Snapshot{p}
 	return nil
 }
-func (m *memoryStore) History(context.Context, string, string) ([]Point, error) {
-	return []Point{}, nil
+func (m *memoryStore) History(context.Context, string, string) (History, error) {
+	return History{Points: []Point{}}, nil
 }
 func (m *memoryStore) Health(context.Context) error { return nil }
 

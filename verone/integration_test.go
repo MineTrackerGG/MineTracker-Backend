@@ -6,6 +6,7 @@ import (
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"math"
 	"os"
 	"reflect"
 	"sync"
@@ -77,13 +78,13 @@ func TestIsolatedDatabases(t *testing.T) {
 	if err := store.Record(ctx, Snapshot{ID: c.ID, Revision: 2, Status: "no_response", UpdatedAt: now.Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}
-	points, err := store.History(ctx, c.ID, "24h")
+	history, err := store.History(ctx, c.ID, "24h")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var samples, responding int64
 	found := false
-	for _, p := range points {
+	for _, p := range history.Points {
 		samples += p.Samples
 		responding += p.Responding
 		if p.Players != nil && *p.Players == 17 {
@@ -91,17 +92,87 @@ func TestIsolatedDatabases(t *testing.T) {
 		}
 	}
 	if samples != 2 || responding != 1 || !found {
-		t.Fatalf("history=%+v", points)
+		t.Fatalf("history=%+v", history)
 	}
 	c.Revision = 3
 	c.Enabled = false
 	if err := store.Put(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	points, err = store.History(ctx, c.ID, "24h")
-	if err != nil || len(points) == 0 {
-		t.Fatalf("history lost on disable: %v %v", points, err)
+	history, err = store.History(ctx, c.ID, "24h")
+	if err != nil || len(history.Points) == 0 {
+		t.Fatalf("history lost on disable: %v %v", history, err)
 	}
+
+	t.Run("history raw stats", func(t *testing.T) {
+		id := uuid.NewString()
+		base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
+		for i, v := range []int{2, 10, 4} {
+			at := base.Add(time.Duration(1+i) * time.Minute)
+			if i == 2 {
+				at = base.Add(65 * time.Minute)
+			}
+			n := v
+			if err := store.Record(ctx, Snapshot{ID: id, Status: "online", Players: &n, UpdatedAt: at}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.Record(ctx, Snapshot{ID: id, Status: "no_response", UpdatedAt: base.Add(70 * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+		outside := 1000
+		if err := store.Record(ctx, Snapshot{ID: id, Status: "online", Players: &outside, UpdatedAt: time.Now().Add(-8 * 24 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		for _, period := range []string{"24h", "7d"} {
+			result, err := store.History(ctx, id, period)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stats := result.Stats
+			if stats.Samples != 3 || stats.Mean == nil || math.Abs(*stats.Mean-16.0/3) > 1e-10 || stats.Min == nil || *stats.Min != 2 || stats.Max == nil || *stats.Max != 10 {
+				t.Fatalf("raw stats %s %+v", period, stats)
+			}
+			chartSum, chartCount := 0, 0
+			for _, p := range result.Points {
+				if p.Players != nil {
+					chartSum += *p.Players
+					chartCount++
+				}
+			}
+			if chartCount == 0 || math.Abs(*stats.Mean-float64(chartSum)/float64(chartCount)) < 1e-10 {
+				t.Fatal("stats used chart maxima")
+			}
+		}
+		result, err := store.History(ctx, id, "30d")
+		if err != nil || result.Stats.Samples != 4 || result.Stats.Max == nil || *result.Stats.Max != 1000 {
+			t.Fatalf("30d window %+v %v", result, err)
+		}
+		for _, zero := range []bool{false, true} {
+			id := uuid.NewString()
+			p := Snapshot{ID: id, Status: "no_response", UpdatedAt: base}
+			if zero {
+				n := 0
+				p.Players = &n
+				p.Status = "online"
+			}
+			if err := store.Record(ctx, p); err != nil {
+				t.Fatal(err)
+			}
+			result, err := store.History(ctx, id, "7d")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stats := result.Stats
+			if zero {
+				if stats.Samples != 1 || stats.Mean == nil || *stats.Mean != 0 || stats.Min == nil || *stats.Min != 0 || stats.Max == nil || *stats.Max != 0 {
+					t.Fatalf("zero real %+v", stats)
+				}
+			} else if stats.Samples != 0 || stats.Mean != nil || stats.Min != nil || stats.Max != nil {
+				t.Fatalf("failures fabricated stats %+v", stats)
+			}
+		}
+	})
 
 	t.Run("hosting persistence across instances", func(t *testing.T) {
 		repository := &MongoHostingRepository{DB: db}

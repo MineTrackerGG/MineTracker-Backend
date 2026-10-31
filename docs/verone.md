@@ -50,3 +50,11 @@ For a restore drill, use a new isolated compose project and new volumes, unpubli
 Rollback: stop the monitor, restore its previous image digest and compatible environment, then restart one instance and verify the API. Configuration revisions must remain monotonic; roll an endpoint back with a higher revision. If data/schema rollback is necessary, restore both backups into replacement volumes and switch the deployment after verification; preserve the old volumes for recovery. Never delete volumes as part of a routine rollback.
 
 No production deployment, backup drill or runtime capacity claim is implied by the repository tests.
+
+## Raw history statistics
+
+`GET /v1/servers/:uuid/history?period=24h|7d|30d` additionally returns `stats:{mean,min,max,samples}`. The existing points, period and `aggregation:"maximum"` fields keep their semantics. Chart points are window maxima; statistics are computed independently from all raw `players` samples in the selected period, using a server-side streaming Influx reduction. Mean is the sum divided by the number of responding samples, with raw minimum/maximum and responding sample count. It is sample-weighted, not a time-weighted average or an average of chart maxima.
+
+For raw samples `[2,10,4]`, mean is `16/3`, minimum2, maximum10, samples3, regardless of chart bucket maxima. Failed probes omit `players` and do not become zeros or contribute to stats. A real online zero contributes one sample with value0. Without responding samples, mean/min/max are null and samples is0. `Snapshot.peak` remains the Mongo all-time observed record, independently of the selected history period.
+
+Points and stats use one Influx query, shared explicit UTC start/stop instants and the same raw source. Only bounded chart points plus one statistics record cross the API connection; raw history is not downloaded to calculate stats. The existing request deadline and chart point limit remain in force. Concurrent delayed writes with timestamps inside the interval retain Influx's ordinary query consistency; this is not a cross-database snapshot guarantee.

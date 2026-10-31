@@ -48,3 +48,15 @@ type Point struct {
 	Responding int64 `json:"responding"`
 	Samples    int64 `json:"samples"`
 }
+
+// HistoryStats describes raw responding samples, independently of chart windows.
+type HistoryStats struct {
+	Mean    *float64 `json:"mean"`
+	Min     *int64   `json:"min"`
+	Max     *int64   `json:"max"`
+	Samples int64    `json:"samples"`
+}
+type History struct {
+	Points []Point      `json:"points"`
+	Stats  HistoryStats `json:"stats"`
+}

@@ -173,12 +173,12 @@ func Router(s *Service, readToken, adminToken string) *gin.Engine {
 			c.Status(404)
 			return
 		}
-		points, err := s.Store.History(ctx, id, period)
+		history, err := s.Store.History(ctx, id, period)
 		if err != nil {
 			c.Status(503)
 			return
 		}
-		c.JSON(200, gin.H{"points": points, "period": period, "aggregation": "maximum"})
+		c.JSON(200, gin.H{"points": history.Points, "period": period, "aggregation": "maximum", "stats": history.Stats})
 	})
 	hostingRoutes(r, s)
 	return r

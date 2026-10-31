@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strconv"
@@ -22,7 +23,7 @@ type Store interface {
 	Put(context.Context, Config) error
 	Snapshots(context.Context) ([]Snapshot, error)
 	Record(context.Context, Snapshot) error
-	History(context.Context, string, string) ([]Point, error)
+	History(context.Context, string, string) (History, error)
 	Health(context.Context) error
 }
 
@@ -84,27 +85,50 @@ func (s *DatabaseStore) Record(ctx context.Context, p Snapshot) error {
 	return s.Influx.WriteAPIBlocking(os.Getenv("INFLUXDB_ORG"), os.Getenv("INFLUXDB_BUCKET")).WritePoint(ctx, point)
 }
 
-func (s *DatabaseStore) History(ctx context.Context, id, period string) ([]Point, error) {
-	duration, step := "-24h", "5m"
+func historyQuery(bucket, id, period string, stop time.Time) string {
+	duration, step := 24*time.Hour, "5m"
 	switch period {
 	case "7d":
-		duration, step = "-7d", "1h"
+		duration, step = 7*24*time.Hour, "1h"
 	case "30d":
-		duration, step = "-30d", "3h"
+		duration, step = 30*24*time.Hour, "3h"
 	}
-	base := fmt.Sprintf(`from(bucket: %s) |> range(start: %s) |> filter(fn: (r) => r._measurement == "verone_samples" and r.server_id == %s)`, strconv.Quote(os.Getenv("INFLUXDB_BUCKET")), duration, strconv.Quote(id))
-	query := fmt.Sprintf(`base = %s
+	base := fmt.Sprintf(`from(bucket: %s) |> range(start: time(v: %s), stop: time(v: %s)) |> filter(fn: (r) => r._measurement == "verone_samples" and r.server_id == %s)`, strconv.Quote(bucket), strconv.Quote(stop.Add(-duration).Format(time.RFC3339Nano)), strconv.Quote(stop.Format(time.RFC3339Nano)), strconv.Quote(id))
+	return fmt.Sprintf(`base = %s
 p = base |> filter(fn: (r) => r._field == "players") |> aggregateWindow(every: %s, fn: max, createEmpty: false)
 s = base |> filter(fn: (r) => r._field == "samples" or r._field == "responding") |> aggregateWindow(every: %s, fn: sum, createEmpty: false)
-union(tables: [p,s]) |> group(columns: ["server_id"]) |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") |> sort(columns: ["_time"]) |> limit(n: 1000)`, base, step, step)
+union(tables: [p,s]) |> group(columns: ["server_id"]) |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") |> sort(columns: ["_time"]) |> limit(n: 1000) |> yield(name: "points")
+base |> filter(fn: (r) => r._field == "players") |> group(columns: [])
+ |> reduce(identity: {total: 0.0, samples: 0, minimum: 0, maximum: 0}, fn: (r, accumulator) => ({
+ total: accumulator.total + float(v: r._value), samples: accumulator.samples + 1,
+ minimum: if accumulator.samples == 0 or r._value < accumulator.minimum then r._value else accumulator.minimum,
+ maximum: if accumulator.samples == 0 or r._value > accumulator.maximum then r._value else accumulator.maximum
+ }))
+ |> filter(fn: (r) => r.samples > 0)
+ |> map(fn: (r) => ({stats: true, mean: r.total / float(v: r.samples), minimum: r.minimum, maximum: r.maximum, samples: r.samples})) |> yield(name: "stats")`, base, step, step)
+}
+
+func (s *DatabaseStore) History(ctx context.Context, id, period string) (History, error) {
+	history := History{Points: []Point{}}
+	query := historyQuery(os.Getenv("INFLUXDB_BUCKET"), id, period, time.Now().UTC())
 	res, err := s.Influx.QueryAPI(os.Getenv("INFLUXDB_ORG")).Query(ctx, query)
 	if err != nil {
-		return nil, err
+		return history, err
 	}
 	defer res.Close()
-	points := []Point{}
 	for res.Next() {
 		r := res.Record()
+		if stats, _ := r.ValueByKey("stats").(bool); stats {
+			mean, mok := r.ValueByKey("mean").(float64)
+			min, minok := r.ValueByKey("minimum").(int64)
+			max, maxok := r.ValueByKey("maximum").(int64)
+			samples, sok := r.ValueByKey("samples").(int64)
+			if !mok || !minok || !maxok || !sok || samples < 1 || math.IsNaN(mean) || math.IsInf(mean, 0) {
+				return history, errors.New("invalid history statistics")
+			}
+			history.Stats = HistoryStats{Mean: &mean, Min: &min, Max: &max, Samples: samples}
+			continue
+		}
 		p := Point{Timestamp: r.Time().Unix()}
 		if v, ok := r.ValueByKey("players").(int64); ok {
 			n := int(v)
@@ -116,9 +140,9 @@ union(tables: [p,s]) |> group(columns: ["server_id"]) |> pivot(rowKey: ["_time"]
 		if v, ok := r.ValueByKey("responding").(int64); ok {
 			p.Responding = v
 		}
-		points = append(points, p)
+		history.Points = append(history.Points, p)
 	}
-	return points, res.Err()
+	return history, res.Err()
 }
 
 func (s *DatabaseStore) Health(ctx context.Context) error {
